@@ -1,0 +1,8 @@
+{
+  "name": "saraqib store",
+  "description": "منصة متكاملة لشحن الألعاب، التطبيقات، الرصيد، والبطاقات الرقمية مع نظام محفظة متطور ولوحة تحكم شاملة ودعم فني متواصل.",
+  "requestFramePermissions": [
+    "notifications"
+  ],
+  "theme_color": "#9333ea"
+}

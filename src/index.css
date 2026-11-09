@@ -1,0 +1,403 @@
+@import "tailwindcss";
+@theme {
+  --font-sans: "Cairo", ui-sans-serif, system-ui, sans-serif;
+  --color-brand: #000000;
+  --color-brand-light: #8DACFF;
+  --color-brand-soft: #8DACFF;
+}
+
+/* ===== تظليل تحديد النص (Text Selection) ===== */
+::selection {
+  background-color: var(--brand);
+  color: #ffffff;
+}
+::-moz-selection {
+  background-color: var(--brand);
+  color: #ffffff;
+}
+/* إزالة tap highlight على الموبايل */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+/* إخفاء شريط التمرير (يزيل الخط الرمادي أسفل أزرار الفلترة) */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+/* ===== متغيرات الثيم الرئيسية — غيّر هنا فقط ===== */
+:root {
+  --brand: #000000;
+  --brand-dark: #4D7EFF;
+  --brand-light: #8DACFF;
+  --brand-soft: #8DACFF;
+  --brand-contrast: #ffffff;
+}
+
+@layer base {
+  :root {
+    --bg-primary: #ffffff;
+    --text-primary: #111827;
+    --bg-secondary: #f9fafb;
+    --border-color: #f3f4f6;
+  }
+
+  .dark {
+    --bg-primary: #000000;
+    --text-primary: #ffffff;
+    --bg-secondary: #111111;
+    --border-color: #222222;
+  }
+
+  /* خط Cairo الناعم — مطبق على كامل التطبيق داخل base layer ليتغلب على Tailwind */
+  html, body, *, *::before, *::after {
+    font-family: "Cairo", ui-sans-serif, system-ui, sans-serif !important;
+  }
+
+  body {
+    @apply bg-[var(--bg-primary)] text-[var(--text-primary)] transition-colors duration-300;
+    font-family: "Cairo", ui-sans-serif, system-ui, sans-serif !important;
+    font-weight: 400;
+  }
+}
+
+/* تخفيف أوزان الخطوط ليكون Cairo أكثر نعومة — يُطبق بعد Tailwind */
+@layer utilities {
+  .font-black    { font-weight: 700 !important; }
+  .font-extrabold { font-weight: 700 !important; }
+  .font-bold     { font-weight: 600 !important; }
+  .font-semibold { font-weight: 500 !important; }
+  .font-medium   { font-weight: 400 !important; }
+  .font-normal   { font-weight: 400 !important; }
+  .font-light    { font-weight: 300 !important; }
+}
+.splash-screen {
+  position: fixed;
+  inset: 0;
+  background: black;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.splash-logo {
+  width: 150px;
+  height: 150px;
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0% { transform: scale(1); opacity: 0.8; }
+  50% { transform: scale(1.1); opacity: 1; }
+  100% { transform: scale(1); opacity: 0.8; }
+}
+
+/* ============================================================
+   DARK MODE — FULL COVERAGE OVERRIDES
+   ============================================================ */
+.dark .bg-white   { @apply bg-black; }
+.dark .bg-gray-50  { @apply bg-zinc-900; }
+.dark .bg-gray-100 { @apply bg-zinc-800; }
+.dark .bg-gray-200 { @apply bg-zinc-700; }
+.dark .bg-gray-300 { @apply bg-zinc-600; }
+.dark .bg-slate-50  { @apply bg-zinc-900; }
+.dark .bg-slate-100 { @apply bg-zinc-800; }
+.dark .bg-neutral-50  { @apply bg-zinc-900; }
+.dark .bg-neutral-100 { @apply bg-zinc-800; }
+
+.dark .text-black    { @apply text-white; }
+.dark .text-gray-900 { @apply text-white; }
+.dark .text-gray-800 { @apply text-white; }
+.dark .text-gray-700 { @apply text-gray-200; }
+.dark .text-gray-600 { @apply text-gray-300; }
+.dark .text-gray-500 { @apply text-gray-400; }
+.dark .text-gray-400 { @apply text-gray-500; }
+.dark .text-slate-800 { @apply text-white; }
+.dark .text-slate-700 { @apply text-gray-200; }
+.dark .text-slate-600 { @apply text-gray-300; }
+.dark .text-slate-500 { @apply text-gray-400; }
+
+.dark .placeholder-gray-400::placeholder,
+.dark input::placeholder,
+.dark textarea::placeholder { color: #6b7280 !important; }
+
+.dark .border-white   { @apply border-black; }
+.dark .border-gray-100 { @apply border-zinc-800; }
+.dark .border-gray-200 { @apply border-zinc-700; }
+.dark .border-gray-300 { @apply border-zinc-600; }
+.dark .border-slate-100 { @apply border-zinc-800; }
+.dark .border-slate-200 { @apply border-zinc-700; }
+.dark .divide-gray-100 { @apply divide-zinc-800; }
+.dark .divide-gray-200 { @apply divide-zinc-700; }
+.dark .shadow-sm { @apply shadow-none; }
+.dark .shadow-md { @apply shadow-none; }
+.dark .shadow-lg { @apply shadow-none; }
+.dark .shadow-xl { @apply shadow-none; }
+.dark .shadow-2xl { @apply shadow-none; }
+
+/* Inputs / form fields: always keep a visible border + readable text */
+.dark input,
+.dark select,
+.dark textarea {
+  background-color: #111111;
+  color: #ffffff;
+  border-color: #333333;
+}
+
+.dark button:disabled,
+.dark [disabled] {
+  opacity: 0.5;
+}
+
+/* Ensure brand-colored buttons keep readable contrast text on both modes */
+.btn-brand,
+.bg-brand {
+  background-color: var(--brand) !important;
+  color: var(--brand-contrast) !important;
+}
+.text-brand { color: var(--brand) !important; }
+.border-brand { border-color: var(--brand) !important; }
+
+/* ============================================================
+   BRAND-CONTRAST SAFETY NET
+   Many components hardcode "text-white" (or similar) next to a
+   brand-colored background utility. If the admin picks white or
+   black as the brand color, that hardcoded text becomes invisible.
+   These rules force any element with a SOLID brand background to
+   always use the computed --brand-contrast color for its own text
+   AND for any icon/text nested directly inside it, regardless of
+   whatever text-* utility class was hardcoded in the markup.
+   Also covers gradient cards that start FROM the brand color
+   (bg-gradient-to-* from-brand / from-[var(--brand)]) — since a
+   black brand color gets nudged to white for dark mode, and a
+   hardcoded text-white on that same white-ish gradient becomes
+   unreadable.
+   Note: bg-brand-light / bg-brand-soft are intentionally excluded —
+   those are light tint backgrounds meant to pair with text-brand,
+   not with a full black/white contrast color.
+   ============================================================ */
+.bg-brand:not(.bg-brand-light):not(.bg-brand-soft),
+[class~="bg-[var(--brand)]"],
+[class*="from-brand"],
+[class*="from-[var(--brand)]"] {
+  color: var(--brand-contrast) !important;
+}
+.bg-brand:not(.bg-brand-light):not(.bg-brand-soft) *,
+[class~="bg-[var(--brand)]"] *,
+[class*="from-brand"] *,
+[class*="from-[var(--brand)]"] * {
+  color: inherit;
+}
+/* Neutral text utilities (white/black/gray shades and white/black opacity
+   variants like text-white/70) are almost always meant to mean "readable
+   text on this colored surface", not a specific hue — so on a solid brand
+   background they must follow --brand-contrast too, with enough priority
+   to beat the hardcoded utility class. Semantic colors (red/green/blue/
+   yellow/amber/etc, used for status, links, badges) are intentionally
+   left alone so they keep their real meaning. */
+.bg-brand:not(.bg-brand-light):not(.bg-brand-soft) .text-white,
+.bg-brand:not(.bg-brand-light):not(.bg-brand-soft) [class*="text-white/"],
+.bg-brand:not(.bg-brand-light):not(.bg-brand-soft) .text-black,
+.bg-brand:not(.bg-brand-light):not(.bg-brand-soft) [class*="text-black/"],
+.bg-brand:not(.bg-brand-light):not(.bg-brand-soft) [class*="text-gray-"],
+.bg-brand:not(.bg-brand-light):not(.bg-brand-soft) [class*="text-slate-"],
+.bg-brand:not(.bg-brand-light):not(.bg-brand-soft) [class*="text-zinc-"],
+[class~="bg-[var(--brand)]"] .text-white,
+[class~="bg-[var(--brand)]"] [class*="text-white/"],
+[class~="bg-[var(--brand)]"] .text-black,
+[class~="bg-[var(--brand)]"] [class*="text-black/"],
+[class~="bg-[var(--brand)]"] [class*="text-gray-"],
+[class~="bg-[var(--brand)]"] [class*="text-slate-"],
+[class~="bg-[var(--brand)]"] [class*="text-zinc-"],
+[class*="from-brand"] .text-white,
+[class*="from-brand"] [class*="text-white/"],
+[class*="from-brand"] .text-black,
+[class*="from-brand"] [class*="text-black/"],
+[class*="from-brand"] [class*="text-gray-"],
+[class*="from-brand"] [class*="text-slate-"],
+[class*="from-brand"] [class*="text-zinc-"],
+[class*="from-[var(--brand)]"] .text-white,
+[class*="from-[var(--brand)]"] [class*="text-white/"],
+[class*="from-[var(--brand)]"] .text-black,
+[class*="from-[var(--brand)]"] [class*="text-black/"],
+[class*="from-[var(--brand)]"] [class*="text-gray-"],
+[class*="from-[var(--brand)]"] [class*="text-slate-"],
+[class*="from-[var(--brand)]"] [class*="text-zinc-"] {
+  color: var(--brand-contrast) !important;
+}
+/* Same idea for backgrounds nested inside a solid brand surface that used
+   white/black opacity as a "frosted chip" effect (e.g. bg-white/20 badges
+   showing the user id or balance) — keep the chip visible by tying its
+   background to the contrast color instead of a fixed white/black. */
+.bg-brand:not(.bg-brand-light):not(.bg-brand-soft) [class*="bg-white/"],
+.bg-brand:not(.bg-brand-light):not(.bg-brand-soft) [class*="bg-black/"],
+[class~="bg-[var(--brand)]"] [class*="bg-white/"],
+[class~="bg-[var(--brand)]"] [class*="bg-black/"],
+[class*="from-brand"] [class*="bg-white/"],
+[class*="from-brand"] [class*="bg-black/"],
+[class*="from-[var(--brand)]"] [class*="bg-white/"],
+[class*="from-[var(--brand)]"] [class*="bg-black/"] {
+  background-color: color-mix(in srgb, var(--brand-contrast) 20%, transparent) !important;
+}
+
+/* Scrollbar thumb follows theme */
+::-webkit-scrollbar-thumb { background-color: var(--border-color); border-radius: 8px; }
+::-webkit-scrollbar-track { background-color: transparent; }
+
+/* VIP Glowing Theme */
+.vip-glow {
+  position: relative;
+  overflow: hidden;
+  border: 2px solid transparent;
+  background: linear-gradient(white, white) padding-box,
+              linear-gradient(45deg, #FFD700, #FFA500, #FFD700) border-box;
+}
+
+.vip-glow::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: conic-gradient(
+    transparent,
+    rgba(255, 215, 0, 0.6),
+    transparent 30%
+  );
+  animation: rotate 3s linear infinite;
+}
+
+.vip-card-glow {
+  position: relative;
+  background: linear-gradient(135deg, #fff 0%, #fff9e6 100%);
+  box-shadow: 0 0 20px rgba(255, 215, 0, 0.4), 0 0 40px rgba(255, 215, 0, 0.1);
+  animation: vip-pulse 3s infinite ease-in-out;
+  border: 1px solid rgba(255, 215, 0, 0.5) !important;
+}
+
+.vip-card-glow::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  background: linear-gradient(45deg, #FFD700, #FFA500, #FFD700);
+  border-radius: inherit;
+  z-index: -1;
+  opacity: 0.3;
+  filter: blur(8px);
+  animation: vip-border-glow 3s infinite alternate;
+}
+
+@keyframes rotate {
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes vip-pulse {
+  0% { transform: scale(1); box-shadow: 0 0 20px rgba(255, 215, 0, 0.4); }
+  50% { transform: scale(1.01); box-shadow: 0 0 30px rgba(255, 215, 0, 0.6); }
+  100% { transform: scale(1); box-shadow: 0 0 20px rgba(255, 215, 0, 0.4); }
+}
+
+@keyframes vip-border-glow {
+  0% { opacity: 0.2; filter: blur(5px); }
+  100% { opacity: 0.5; filter: blur(12px); }
+}
+
+.vip-text-glow {
+  background: linear-gradient(45deg, #B8860B, #FFD700, #B8860B);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0 5px rgba(255, 215, 0, 0.5));
+  animation: vip-text-pulse 2s infinite alternate;
+  font-weight: 900 !important;
+}
+
+@keyframes vip-text-pulse {
+  0% { filter: drop-shadow(0 0 3px rgba(255, 215, 0, 0.4)); transform: scale(1); }
+  100% { filter: drop-shadow(0 0 8px rgba(255, 215, 0, 0.8)); transform: scale(1.02); }
+}
+
+.vip-badge {
+  background: linear-gradient(45deg, #FFD700, #FFA500);
+  color: #000;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+  box-shadow: 0 0 10px rgba(255, 215, 0, 0.5);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ===== REWARD FRAMES ===== */
+.frame-bronze { border: 3px solid #cd7f32 !important; box-shadow: 0 0 12px rgba(205,127,50,0.5); }
+.frame-silver { border: 3px solid #a8a9ad !important; box-shadow: 0 0 12px rgba(168,169,173,0.5); }
+.frame-vip    { border: 3px solid #7c3aed !important; box-shadow: 0 0 14px rgba(124,58,237,0.5); }
+.frame-gold_animated {
+  border: 3px solid #ffd700 !important;
+  animation: gold-frame-pulse 2s infinite alternate;
+}
+@keyframes gold-frame-pulse {
+  0%   { box-shadow: 0 0 10px rgba(255,215,0,0.5); }
+  100% { box-shadow: 0 0 24px rgba(255,165,0,0.9); }
+}
+.frame-legendary {
+  border: 3px solid transparent !important;
+  background-clip: padding-box;
+  box-shadow: 0 0 0 3px #ff4500, 0 0 20px rgba(255,69,0,0.7);
+  animation: legendary-pulse 1.5s infinite alternate;
+}
+@keyframes legendary-pulse {
+  0%   { box-shadow: 0 0 0 3px #ff4500, 0 0 15px rgba(255,69,0,0.5); }
+  100% { box-shadow: 0 0 0 3px #ffd700, 0 0 28px rgba(255,215,0,0.8); }
+}
+
+/* ===== BADGE COLORS ===== */
+.badge-bronze   { background: linear-gradient(135deg,#cd7f32,#8b4513); color:#fff; }
+.badge-active   { background: linear-gradient(135deg,#22c55e,#16a34a); color:#fff; }
+.badge-energy   { background: linear-gradient(135deg,#f59e0b,#d97706); color:#fff; }
+.badge-silver   { background: linear-gradient(135deg,#a8a9ad,#6b7280); color:#fff; }
+.badge-gold     { background: linear-gradient(135deg,#ffd700,#b8860b); color:#000; }
+.badge-diamond  { background: linear-gradient(135deg,#67e8f9,#0ea5e9,#7c3aed); color:#fff; }
+.badge-legendary { background: linear-gradient(135deg,#ff4500,#ff8c00,#ffd700); color:#fff; animation: legendary-pulse 1.5s infinite alternate; }
+
+/* ===== TOAST ANIMATIONS ===== */
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(-16px) scale(0.95); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes toastOut {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to   { opacity: 0; transform: translateY(-10px) scale(0.95); }
+}
+
+/* ===== PRESS EFFECT REMOVED ===== */
+
+/* ===== CUSTOM DIALOG ANIMATION ===== */
+@keyframes slideUpDialog {
+  from { transform: translateY(100%); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+
+/* ===== BOTTOM SHEET ANIMATION (ChatSettingsPage) ===== */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+
+/* ===== TYPING INDICATOR ===== */
+.animate-fade-in {
+  animation: fadeIn 0.25s ease-in-out;
+}

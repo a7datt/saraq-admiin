@@ -1,0 +1,28 @@
+# [SECURITY FIX] لم يكن هذا الملف موجوداً بالمستودع إطلاقاً — ما يعني عدم وجود أي حماية
+# افتراضية تمنع دفع ملف .env (الذي يحوي كل الأسرار: مفاتيح Supabase، JWT_SECRET،
+# PROVIDER_ENCRYPTION_KEY، مفاتيح Telegram/Resend/Google...) بالخطأ إلى Git.
+
+# متغيرات البيئة والأسرار — لا تُدفع أبداً
+.env
+.env.*
+!.env.example
+
+# التبعيات
+node_modules/
+
+# مخرجات البناء
+dist/
+dist-ssr/
+build/
+
+# ملفات النظام والمحررات
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+.vscode/
+.idea/
+
+# ملفات مؤقتة/تصحيح لا يجب أن تكون في المستودع
+*.tmp
+*.bak

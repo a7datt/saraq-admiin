@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ar" translate="no" class="notranslate">
+  <head>
+    <meta name="google" content="notranslate" />
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Saraqib Store</title>
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#000000" />
+    <script>
+      // Applies the last-known store color instantly, before any CSS/JS loads,
+      // so the default blue never has a chance to flash on screen.
+      (function () {
+        try {
+          var raw = localStorage.getItem("saraqib_store_appearance_cache");
+          if (!raw) return;
+          var a = JSON.parse(raw);
+          if (!a || !a.primary_color) return;
+          var root = document.documentElement;
+          var mode = a.theme_mode;
+          if (mode === "system") {
+            mode = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+          }
+          if (mode === "dark") root.classList.add("dark");
+          var hex = String(a.primary_color).trim().toLowerCase();
+          var resolved = a.primary_color;
+          if (mode === "dark" && (hex === "#000000" || hex === "#000")) resolved = "#ffffff";
+          if (mode === "light" && (hex === "#ffffff" || hex === "#fff")) resolved = "#000000";
+          root.style.setProperty("--brand", resolved);
+          root.style.setProperty("--color-brand", resolved);
+        } catch (e) {}
+      })();
+    </script>
+            <meta name="description" content="Saraqib Store, Saraqib Store, شحن شحن العاب، شحن تطبيقات شحن ببجي شحن فري فاير شام كاش  متجر متخصص في شحن الألعاب والتطبيقات، بطاقات الهدايا، وشحن العملات داخل الألعاب بأسعار منافسة وتسليم فوري. أفضل منصة عربية لخدمات الألعاب الرقمية.">
+    <meta name="keywords" content="شحن ألعاب, شحن ببجي, شحن فري فاير, بطاقات هدايا, شحن تطبيقات, متجر ألعاب, شحن شدات, شحن جواهر, متجر رقمي, ببجي, شحن جواهر فري فاير, شدات, شدات ببجي, شحن شدات ببجي, شام كاش, سريتيل كاش, اقرب أليك, اقرب اليك, شام">
+
+    <meta property="og:title" content="Saraqib Store">
+    <meta property="og:description" content="أفضل متجر عربي لشحن الألعاب والتطبيقات مع تسليم فوري وأسعار منافسة.">
+    <meta property="og:image" content="/logo.svg">
+    <meta property="og:image:type" content="image/jpeg">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+
+    <link rel="apple-touch-icon" sizes="180x180" href="/logo.svg">
+    <link rel="icon" type="image/png" sizes="192x192" href="/logo.svg">
+    <link rel="icon" type="image/png" sizes="512x512" href="/logo.svg">
+    <link rel="preconnect" href="https://i.ibb.co" crossorigin>
+    <link rel="dns-prefetch" href="https://i.ibb.co">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!--
+      [FIX] شاشة تحميل ثابتة بخلفية مصمتة (وليست شفافة) تُعرَض فوراً من الـ HTML الخام قبل
+      تحميل أي JS، بدل ترك المتصفح يعرض شاشة فارغة/شفافة أثناء تحميل الحزمة ثم ظهور المحتوى
+      تدريجياً "شوي شوي" بلا أي مؤشر. تُخفى تلقائياً بمجرد أن يُركّب React أول عنصر داخل #root.
+      اللون يُطابق نفس منطق الخط أعلاه (آخر لون محفوظ + الوضع الليلي/النهاري) لتفادي أي وميض.
+    -->
+    <div id="initial-splash" style="position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;background:#ffffff;transition:opacity .25s ease;">
+      <div style="width:40px;height:40px;border-radius:50%;border:3px solid rgba(0,0,0,.12);border-top-color:var(--brand,#0936AD);animation:initial-splash-spin .8s linear infinite;"></div>
+    </div>
+    <style>
+      @keyframes initial-splash-spin { to { transform: rotate(360deg); } }
+      html.dark #initial-splash { background:#000000; }
+      html.dark #initial-splash > div { border-color: rgba(255,255,255,.15); border-top-color: var(--brand,#4D7EFF); }
+    </style>
+    <script>
+      // يُطبَّق نفس اكتشاف الوضع الليلي المستخدم أعلاه على الـ splash نفسه فوراً
+      (function () {
+        try {
+          var raw = localStorage.getItem("saraqib_store_appearance_cache");
+          var mode = raw ? JSON.parse(raw).theme_mode : null;
+          if (mode === "system" || !mode) {
+            mode = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+          }
+          if (mode === "dark") document.documentElement.classList.add("dark");
+        } catch (e) {}
+      })();
+    </script>
+
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
