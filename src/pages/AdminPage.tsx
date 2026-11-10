@@ -51,6 +51,7 @@ import {
   Globe,
   Eye,
   ImageOff,
+  Award,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -70,6 +71,7 @@ import CustomSelect from "../components/CustomSelect";
 import { ensureDefaultFields, ensurePaymentMethodDefaultFields, PaymentFieldDef } from "../utils/defaultFields";
 import CurrenciesAdminPage from "./CurrenciesAdminPage";
 import AdminHomePage from "./AdminHomePage";
+import AdminRanksPage from "./AdminRanksPage";
 import AdminStatsPage from "./AdminStatsPage";
 import SessionsActivityAdminPage from "./SessionsActivityAdminPage";
 import DevManagementPage from "./DevManagementPage";
@@ -3336,6 +3338,7 @@ export default function AdminPage({
                         { label: "شحن الرصيد", icon: <Wallet size={17}/>, action: () => { setActiveSubMenu("add_balance"); } },
                         { label: "طرق الدفع التلقائية", icon: <Wallet size={17}/>, action: () => { setAdminTab("payment_gateways"); } },
                         { label: "انشاء قسيمة", icon: <Ticket size={17}/>, action: () => { setActiveSubMenu("add_voucher"); } },
+                        { label: "تحديد الرتب", icon: <Award size={17}/>, action: () => { setAdminTab("ranks"); } },
                       ].map((item, i) => (
                         <button
                           key={i}
@@ -3481,6 +3484,7 @@ export default function AdminPage({
           {adminTab === "payment_gateways" && <PaymentGatewaysAdminPage adminFetch={adminFetch} onBack={() => setAdminTab("admin_home")} />}
 
           {adminTab === "currencies" && <CurrenciesAdminPage adminFetch={adminFetch} onBack={() => setAdminTab("admin_home")} />}
+          {adminTab === "ranks" && <AdminRanksPage adminFetch={adminFetch} onBack={() => setAdminTab("admin_home")} />}
 
           {/* ===== AHMINIX ===== */}
           {adminTab === "ahminix" && (

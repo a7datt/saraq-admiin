@@ -6,6 +6,7 @@ import {
   User, Mail, Phone, Calendar, Share2, ChevronDown,
   ChevronUp, SlidersHorizontal, Star, MoreHorizontal, ChevronLeft,
   Percent, Power, PowerOff, History, ArrowDownCircle, ArrowUpCircle,
+  Award, Check,
 } from "lucide-react";
 
 interface AdminUsersPageProps {
@@ -77,6 +78,33 @@ const AdminUsersPage = ({
   const [apiDiscountVal, setApiDiscountVal] = React.useState("");
   const [apiSaving, setApiSaving] = React.useState(false);
   const [apiError, setApiError] = React.useState<string | null>(null);
+
+  // نظام الرتب — منح رتبة يدوياً
+  const [rankPanelId, setRankPanelId] = React.useState<number | null>(null);
+  const [ranks, setRanks] = React.useState<any[]>([]);
+  const [ranksLoading, setRanksLoading] = React.useState(false);
+  const [rankSaving, setRankSaving] = React.useState(false);
+  const loadRanks = async () => {
+    setRanksLoading(true);
+    try {
+      const res = await adminFetch("/api/admin/ranks");
+      const data = await res.json();
+      setRanks(Array.isArray(data) ? data.filter((r: any) => r.is_active) : []);
+    } catch { setRanks([]); }
+    setRanksLoading(false);
+  };
+  const grantRank = async (userId: number, rankId: number | null) => {
+    setRankSaving(true);
+    try {
+      const res = await adminFetch(`/api/admin/users/${userId}/rank`, { method: "POST", body: JSON.stringify({ rankId }) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { showToast(data?.error || "فشل منح الرتبة", "error"); setRankSaving(false); return; }
+      showToast("تم تحديث رتبة المستخدم", "success");
+      setRankPanelId(null);
+      fetchAdminUsers();
+    } catch { showToast("خطأ في الاتصال", "error"); }
+    setRankSaving(false);
+  };
 
   const vipCount = adminUsers.filter(u => u.is_vip).length;
   const bannedCount = adminUsers.filter(u => u.is_banned).length;
@@ -252,6 +280,17 @@ const AdminUsersPage = ({
     return null;
   };
 
+  const rankBadge = (u: any) => {
+    const r = ranks.find((x: any) => String(x.id) === String(u.rank_id));
+    if (!r) return null;
+    return (
+      <span className="text-[9px] font-black px-1.5 py-0.5 rounded flex items-center gap-0.5" style={{ backgroundColor: `${r.color}22`, color: r.color }}>
+        <Award size={8}/> {r.name}
+      </span>
+    );
+  };
+  React.useEffect(() => { if (ranks.length === 0) loadRanks(); }, []);
+
   return (
     <div className="space-y-3" dir="rtl">
 
@@ -375,6 +414,7 @@ const AdminUsersPage = ({
                     <div className="flex items-center gap-1.5">
                       <p className="font-bold text-sm text-gray-800 truncate">{u.name}</p>
                       {statusBadge(u)}
+                      {rankBadge(u)}
                     </div>
                     <p className="text-[10px] text-gray-400 truncate">{u.email}</p>
                     <div className="flex items-center gap-2 mt-0.5">
@@ -449,6 +489,41 @@ const AdminUsersPage = ({
                       className={`flex items-center justify-center gap-1 py-2 rounded-md text-[11px] font-bold active:scale-95 border ${apiTokenInfo[u.id]?.enabled === false ? "bg-green-50 text-green-700 border-green-100" : "bg-gray-100 text-gray-600 border-gray-200"}`}>
                       {apiTokenInfo[u.id]?.enabled === false ? <><Power size={11}/> تفعيل API</> : <><PowerOff size={11}/> تعطيل API</>}
                     </button>
+                    <button onClick={() => { setRankPanelId(rankPanelId === u.id ? null : u.id); setRankSaving(false); if (ranks.length === 0) loadRanks(); }}
+                      className="col-span-2 flex items-center justify-center gap-1 bg-[var(--brand)]/10 text-[var(--brand)] py-2 rounded-md text-[11px] font-bold active:scale-95 border border-[var(--brand)]/20">
+                      <Award size={11}/> منح رتبة
+                    </button>
+                  </div>
+                )}
+
+                {/* نافذة منح رتبة */}
+                {rankPanelId === u.id && (
+                  <div className="border-t border-[var(--brand)]/20 bg-[var(--brand)]/5 px-3 py-2.5 space-y-2">
+                    <p className="text-[11px] font-black text-gray-700">اختر الرتبة التي تريد منحها لـ {u.name}</p>
+                    {ranksLoading ? (
+                      <p className="text-center text-xs text-gray-400 py-2">جاري التحميل...</p>
+                    ) : (
+                      <div className="space-y-1.5">
+                        <button
+                          onClick={() => grantRank(u.id, null)}
+                          disabled={rankSaving}
+                          className={`w-full flex items-center justify-between px-3 py-2 rounded-md text-[11px] font-bold border ${!u.manual_rank_id ? "bg-gray-700 text-white border-gray-700" : "bg-white text-gray-600 border-gray-200"}`}>
+                          <span>تلقائي (حسب إجمالي الشحن)</span>
+                          {!u.manual_rank_id && <Check size={12} />}
+                        </button>
+                        {ranks.map((r: any) => (
+                          <button
+                            key={r.id}
+                            onClick={() => grantRank(u.id, r.id)}
+                            disabled={rankSaving}
+                            className={`w-full flex items-center justify-between px-3 py-2 rounded-md text-[11px] font-bold border ${String(u.manual_rank_id) === String(r.id) ? "text-white" : "bg-white text-gray-700 border-gray-200"}`}
+                            style={String(u.manual_rank_id) === String(r.id) ? { backgroundColor: r.color, borderColor: r.color } : undefined}>
+                            <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full" style={{ backgroundColor: r.color }} />{r.name}</span>
+                            {String(u.manual_rank_id) === String(r.id) && <Check size={12} />}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
 

@@ -1830,6 +1830,21 @@ async function sendMainMenu(chatId: number, user: any, bot: TelegramBot) {
   if (sentPanel?.message_id) userActivePanelMessage.set(chatId, sentPanel.message_id);
 }
 
+// --- صافي ربح الطلب (يُستخدم حصراً لحساب عمولة الإحالة) ---
+// external_api: التكلفة = سعر المزوّد للوحدة (cost_price المحفوظ) × الكمية.
+// غير ذلك: default_profit للمنتج (ربح الوحدة) × الكمية. بلا أي معلومة تكلفة/ربح → 0.
+function computeOrderNetProfit(product: any, total: number, qty: number, costPerUnit: number): number {
+  const q = Math.max(1, Number(qty) || 1);
+  if (product?.store_type === "external_api" && costPerUnit > 0) {
+    return Math.max(0, total - costPerUnit * q);
+  }
+  const dp = product?.default_profit;
+  if (dp !== undefined && dp !== null && dp !== "" && !isNaN(parseFloat(String(dp)))) {
+    return Math.max(0, parseFloat(String(dp)) * q);
+  }
+  return 0;
+}
+
 // --- Process Bot Order (Supabase) ---
 async function processBotOrder(chatId: number, user: any, product: any, price: number, extraData: any, quantity: number = 1) {
   try {
@@ -1889,13 +1904,21 @@ async function processBotOrder(chatId: number, user: any, product: any, price: n
     }
     // ========================================================================================
 
-    // Referral commission (dynamic from settings)
+    // عمولة الإحالة = نسبة من صافي ربح الطلب (وليس من مبلغ الشراء)
     if (user.referred_by_id) {
-      const { data: refCommSetting1 } = await supabase.from("settings").select("value").eq("key", "referral_commission").single();
-      const refCommRate1 = parseFloat(refCommSetting1?.value || "5") / 100;
-      const commission = price * refCommRate1;
-      await supabase.rpc("increment_balance", { user_id_param: user.referred_by_id, amount_param: commission });
-      await supabase.from("transactions").insert({ user_id: user.referred_by_id, amount: commission, note: "عمولة إحالة", status: "approved" });
+      try {
+        const { data: refCommSetting1 } = await supabase.from("settings").select("value").eq("key", "referral_commission").single();
+        const refCommRate1 = (parseFloat(refCommSetting1?.value || "5") || 5) / 100;
+        const botCostForProfit = product?.store_type === "external_api" ? botCostPrice : 0;
+        const netProfit = computeOrderNetProfit(product, price, safeQty, botCostForProfit);
+        const commission = Math.round(netProfit * refCommRate1 * 10000) / 10000;
+        if (commission > 0) {
+          await supabase.rpc("increment_balance", { user_id_param: user.referred_by_id, amount_param: commission });
+          await supabase.from("transactions").insert({ user_id: user.referred_by_id, amount: commission, note: `عمولة إحالة (${Math.round(refCommRate1 * 100)}% من صافي ربح الطلب #${order.id})`, status: "approved" });
+        }
+      } catch (refErr) {
+        console.error(`[REFERRAL] فشل حساب/إضافة عمولة الإحالة لطلب البوت #${order.id}:`, refErr);
+      }
     }
 
     userBot?.sendMessage(chatId, `✅ تمت عملية الشراء بنجاح!\nرقم الطلب: ${order.id}\nالمنتج: ${product.name}\nالمبلغ المخصوم: ${price.toFixed(2)}$`);
@@ -6287,6 +6310,17 @@ async function startServer() {
     | { ok: true; body: Record<string, any> }
     | { ok: false; statusCode: number; error: string; details?: any };
 
+  // --- نظام الرتب: نسبة خصم رتبة المستخدم (0 إن لم تكن للرتبة خصم) ---
+  async function getRankDiscountPercent(rankId: any): Promise<number> {
+    if (rankId === null || rankId === undefined) return 0;
+    try {
+      const { data } = await supabase.from("ranks").select("has_discount, discount_percent, is_active").eq("id", rankId).maybeSingle();
+      if (!data || !data.is_active || !data.has_discount) return 0;
+      const pct = parseFloat(String(data.discount_percent)) || 0;
+      return pct > 0 && pct < 100 ? pct : 0;
+    } catch { return 0; }
+  }
+
   async function createOrderCore(
     userId: number | string,
     productId: number | string,
@@ -6382,6 +6416,10 @@ async function startServer() {
       const { data: vipDiscountSetting } = await supabase.from("settings").select("value").eq("key", "vip_discount").single();
       const vipDiscountRate = vipDiscountSetting ? parseFloat(vipDiscountSetting.value) || 5 : 5;
       let discountPercent = user.is_vip ? vipDiscountRate : 0;
+
+      // خصم رتبة المستخدم (نظام الرتب) — يُطبَّق على المشتريات ويُؤخذ الأعلى بين الخصومات
+      const rankDiscount = await getRankDiscountPercent((user as any).rank_id);
+      if (rankDiscount > 0) discountPercent = Math.max(discountPercent, rankDiscount);
 
       if (stats) {
         // خصم مدى الحياة (الهدف 6: 3%، الهدف 7: 5%)
@@ -6686,11 +6724,14 @@ async function startServer() {
           `referral-commission order:${order.id}`,
           async () => {
             const { data: refCommSetting2 } = await supabase.from("settings").select("value").eq("key", "referral_commission").single();
-            const refCommRate2 = parseFloat(refCommSetting2?.value || "5") / 100;
-            const commission = total * refCommRate2;
+            const refCommRate2 = (parseFloat(refCommSetting2?.value || "5") || 5) / 100;
+            // العمولة = نسبة من صافي ربح الطلب فقط (وليس من مبلغ الشراء ولا من الشحن)
+            const netProfit = computeOrderNetProfit(product, total, safeQty, snapshotCostPrice);
+            const commission = Math.round(netProfit * refCommRate2 * 10000) / 10000;
+            if (commission <= 0) return 0;
             const { error: incErr } = await supabase.rpc("increment_balance", { user_id_param: user.referred_by_id, amount_param: commission });
             if (incErr) throw incErr;
-            await supabase.from("transactions").insert({ user_id: user.referred_by_id, amount: commission, note: "عمولة إحالة", status: "approved" });
+            await supabase.from("transactions").insert({ user_id: user.referred_by_id, amount: commission, note: `عمولة إحالة (${Math.round(refCommRate2 * 100)}% من صافي ربح الطلب #${order.id})`, status: "approved" });
             return commission;
           },
           { req }
@@ -9709,6 +9750,7 @@ ${userContext}
   app.use("/api/admin/order-items", permGuard("finance"));
   app.use("/api/admin/analytics", permGuard("analytics"));
   app.use("/api/admin/vouchers", permGuard("vouchers"));
+  app.use("/api/admin/ranks", permGuard("rewards"));
   app.use("/api/admin/currencies", permGuard("currencies"));
   app.use("/api/admin/notify", requirePermission("settings_bots", "edit"));
   app.use("/api/admin/broadcast", requirePermission("settings_bots", "edit"));
@@ -10329,7 +10371,7 @@ ${userContext}
 
   app.get("/api/admin/users", async (req, res) => {
     try {
-      const { data, error } = await supabase.from("users").select("id, name, email, phone, balance, is_vip, is_banned, is_blocked, blocked_until, avatar_url, created_at").order("created_at", { ascending: false });
+      const { data, error } = await supabase.from("users").select("id, name, email, phone, balance, is_vip, is_banned, is_blocked, blocked_until, avatar_url, created_at, rank_id, manual_rank_id").order("created_at", { ascending: false });
       if (error) throw error;
       res.json(Array.isArray(data) ? data : []);
     } catch (e: any) {
@@ -10343,7 +10385,7 @@ ${userContext}
       if (!q) return res.json([]);
       const esc = q.replace(/[%_,]/g, "");
       const isNumeric = /^\d+$/.test(q);
-      const cols = "id, name, email, phone, balance, is_vip, is_banned, is_blocked, blocked_until, avatar_url, created_at";
+      const cols = "id, name, email, phone, balance, is_vip, is_banned, is_blocked, blocked_until, avatar_url, created_at, rank_id, manual_rank_id";
       let data: any[] = [];
       if (isNumeric) {
         const { data: idMatch, error: idErr } = await supabase.from("users").select(cols).eq("id", q).limit(20);
@@ -10457,6 +10499,134 @@ ${userContext}
       console.error("Delete user error:", e);
       safeError(res, e, undefined, req);
     }
+  });
+
+  // =================== RANKS (نظام الرتب) — إدارة ===================
+  const RANK_COLS = "id, name, image_url, color, required_amount, has_discount, discount_percent, description, benefits, is_active, sort_order, created_at, updated_at";
+
+  const sanitizeRankPayload = (body: any, partial: boolean) => {
+    const out: any = {};
+    const err = (m: string) => ({ error: m });
+    if (!partial || body.name !== undefined) {
+      const name = String(body.name ?? "").trim();
+      if (!name || name.length > 60) return err("اسم الرتبة مطلوب (حتى 60 حرفاً)");
+      out.name = name;
+    }
+    if (body.image_url !== undefined) {
+      const img = String(body.image_url ?? "").trim();
+      if (img && !/^https?:\/\//i.test(img) && !img.startsWith("/")) return err("رابط صورة الرتبة غير صحيح");
+      out.image_url = img.slice(0, 1000);
+    }
+    if (body.color !== undefined) {
+      const c = String(body.color ?? "").trim();
+      if (c && !/^#[0-9a-fA-F]{6}$/.test(c)) return err("لون الرتبة يجب أن يكون بصيغة #RRGGBB");
+      out.color = c || "#e11d48";
+    }
+    if (!partial || body.required_amount !== undefined) {
+      const amt = parseFloat(String(body.required_amount));
+      if (!Number.isFinite(amt) || amt < 0 || amt > 100000000) return err("المبلغ المطلوب للرتبة غير صحيح");
+      out.required_amount = amt;
+    }
+    if (body.has_discount !== undefined) out.has_discount = !!body.has_discount;
+    if (body.discount_percent !== undefined) {
+      const pct = parseFloat(String(body.discount_percent));
+      if (!Number.isFinite(pct) || pct < 0 || pct >= 100) return err("نسبة الخصم يجب أن تكون بين 0 و 99");
+      out.discount_percent = pct;
+    }
+    if (body.description !== undefined) out.description = String(body.description ?? "").slice(0, 1000);
+    if (body.benefits !== undefined) out.benefits = String(body.benefits ?? "").slice(0, 2000);
+    if (body.is_active !== undefined) out.is_active = !!body.is_active;
+    if (body.sort_order !== undefined) {
+      const so = parseInt(String(body.sort_order), 10);
+      if (!Number.isFinite(so) || so < 0 || so > 1000) return err("ترتيب العرض غير صحيح");
+      out.sort_order = so;
+    }
+    if (out.has_discount === false) out.discount_percent = 0;
+    return { data: out };
+  };
+
+  app.get("/api/admin/ranks", async (req, res) => {
+    try {
+      const { data, error } = await supabase.from("ranks").select(RANK_COLS).order("sort_order", { ascending: true });
+      if (error) throw error;
+      const ranks = Array.isArray(data) ? data : [];
+      const { data: counts } = await supabase.from("users").select("rank_id");
+      const countMap: Record<string, number> = {};
+      for (const row of counts || []) { if (row.rank_id != null) countMap[String(row.rank_id)] = (countMap[String(row.rank_id)] || 0) + 1; }
+      res.json(ranks.map((r: any) => ({ ...r, users_count: countMap[String(r.id)] || 0 })));
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  app.post("/api/admin/ranks", async (req, res) => {
+    try {
+      const parsed = sanitizeRankPayload(req.body || {}, false);
+      if ("error" in parsed) return res.status(400).json(parsed);
+      const { data, error } = await supabase.from("ranks").insert(parsed.data).select(RANK_COLS).single();
+      if (error) throw error;
+      await supabase.rpc("recalc_all_user_ranks");
+      logAdminActivity({ action_type: "rank_created", target_model: "ranks", target_id: String(data.id), details: `إضافة رتبة جديدة: ${data.name}`, req }).catch(() => {});
+      res.json(data);
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  app.put("/api/admin/ranks/:id", async (req, res) => {
+    try {
+      if (!isValidId(req.params.id)) return res.status(400).json({ error: "معرف غير صحيح" });
+      const parsed = sanitizeRankPayload(req.body || {}, true);
+      if ("error" in parsed) return res.status(400).json(parsed);
+      if (Object.keys(parsed.data).length === 0) return res.status(400).json({ error: "لا توجد حقول للتعديل" });
+      const { data, error } = await supabase.from("ranks").update({ ...parsed.data, updated_at: new Date().toISOString() }).eq("id", req.params.id).select(RANK_COLS).single();
+      if (error) throw error;
+      // أي تغيير في المبلغ/التفعيل/الترتيب قد يغيّر رتب المستخدمين — نعيد الحساب للجميع
+      await supabase.rpc("recalc_all_user_ranks");
+      logAdminActivity({ action_type: "rank_updated", target_model: "ranks", target_id: String(data.id), details: `تعديل الرتبة: ${data.name}`, req }).catch(() => {});
+      res.json(data);
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  app.delete("/api/admin/ranks/:id", async (req, res) => {
+    try {
+      if (!isValidId(req.params.id)) return res.status(400).json({ error: "معرف غير صحيح" });
+      const { count } = await supabase.from("ranks").select("id", { count: "exact", head: true });
+      if ((count || 0) <= 1) return res.status(400).json({ error: "لا يمكن حذف آخر رتبة في النظام" });
+      const { error } = await supabase.from("ranks").delete().eq("id", req.params.id);
+      if (error) throw error;
+      await supabase.rpc("recalc_all_user_ranks");
+      res.json({ success: true });
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  app.post("/api/admin/ranks/recalc", async (req, res) => {
+    try {
+      const { data, error } = await supabase.rpc("recalc_all_user_ranks");
+      if (error) throw error;
+      res.json({ success: true, users: data });
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  // منح رتبة يدوياً لمستخدم (rankId=null يلغي المنح اليدوي ويعود للحساب التلقائي)
+  app.post("/api/admin/users/:id/rank", requirePermission("users", "edit"), async (req, res) => {
+    try {
+      if (!isValidId(req.params.id)) return res.status(400).json({ error: "معرف غير صحيح" });
+      const { rankId } = req.body || {};
+      let manualRankId: number | null = null;
+      if (rankId !== null && rankId !== undefined && rankId !== "") {
+        if (!isValidId(rankId)) return res.status(400).json({ error: "معرف الرتبة غير صحيح" });
+        const { data: rank } = await supabase.from("ranks").select("id, name, is_active").eq("id", rankId).maybeSingle();
+        if (!rank) return res.status(404).json({ error: "الرتبة غير موجودة" });
+        if (!rank.is_active) return res.status(400).json({ error: "لا يمكن منح رتبة معطّلة" });
+        manualRankId = Number(rank.id);
+      }
+      const { data: userRow } = await supabase.from("users").select("id, name").eq("id", req.params.id).maybeSingle();
+      if (!userRow) return res.status(404).json({ error: "المستخدم غير موجود" });
+      const { error: updErr } = await supabase.from("users").update({ manual_rank_id: manualRankId }).eq("id", req.params.id);
+      if (updErr) throw updErr;
+      // التريغر يعيد الحساب تلقائياً، ونستدعي الدالة صراحة لضمان النتيجة الفورية
+      const { data: finalRankId } = await supabase.rpc("recalc_user_rank", { p_user_id: Number(req.params.id) });
+      const { data: finalRank } = finalRankId ? await supabase.from("ranks").select(RANK_COLS).eq("id", finalRankId).maybeSingle() : { data: null };
+      logAdminActivity({ action_type: "user_rank_granted", target_model: "users", target_id: String(userRow.id), details: manualRankId ? `منح رتبة "${finalRank?.name || manualRankId}" للمستخدم ${userRow.name} (#${userRow.id})` : `إلغاء الرتبة اليدوية للمستخدم ${userRow.name} (#${userRow.id})`, req }).catch(() => {});
+      res.json({ success: true, rank_id: finalRankId ?? null, manual_rank_id: manualRankId, rank: finalRank || null });
+    } catch (e: any) { safeError(res, e, undefined, req); }
   });
 
   // تفاصيل مستخدم واحد (للأدمن)
