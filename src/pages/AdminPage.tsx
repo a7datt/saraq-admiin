@@ -3750,8 +3750,9 @@ export default function AdminPage({
                   { key:"add_balance", label:"إضافة رصيد", icon:<Wallet size={18}/>, color:"text-green-600 bg-green-50" },
                   { key:"add_voucher", label:"قسيمة تخفيض", icon:<Ticket size={18}/>, color:"text-purple-600 bg-purple-50" },
                   { key:"payment_gateways", label:"طرق الدفع الآلية", icon:<Wallet size={18}/>, color:"text-indigo-600 bg-indigo-50" },
+                  { key:"ranks", label:"تحديد الرتب", icon:<Award size={18}/>, color:"text-rose-600 bg-rose-50" },
                 ].map(item => (
-                  <button key={item.key} onClick={() => { if(item.key==="payment_gateways"){setAdminTab("payment_gateways");setActiveSubMenu(null);}else if(item.key==="add_paymentMethod"){setAdminTab("add_paymentMethod");setActiveSubMenu("add_paymentMethod");}else setActiveSubMenu(item.key); }}
+                  <button key={item.key} onClick={() => { if(item.key==="payment_gateways"){setAdminTab("payment_gateways");setActiveSubMenu(null);}else if(item.key==="ranks"){setAdminTab("ranks");setActiveSubMenu(null);}else if(item.key==="add_paymentMethod"){setAdminTab("add_paymentMethod");setActiveSubMenu("add_paymentMethod");}else setActiveSubMenu(item.key); }}
                     className="flex flex-col items-center gap-1.5 p-2 rounded-lg hover:bg-gray-50 active:scale-95 transition-all">
                     <div className={`w-11 h-11 rounded-lg flex items-center justify-center ${item.color}`}>{item.icon}</div>
                     <span className="text-[9px] font-bold text-gray-600 text-center leading-tight">{item.label}</span>
