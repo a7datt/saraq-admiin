@@ -6353,14 +6353,26 @@ async function startServer() {
     | { ok: true; body: Record<string, any> }
     | { ok: false; statusCode: number; error: string; details?: any };
 
-  // --- نظام الرتب: نسبة خصم رتبة المستخدم (0 إن لم تكن للرتبة خصم) ---
-  async function getRankDiscountPercent(rankId: any): Promise<number> {
+  // --- نظام الرتب: نسبة خصم رتبة المستخدم (0 إن لم تكن للرتبة خصم أو لم يكن المنتج ضمن
+  //     الأقسام/الأقسام الفرعية التي حددها الأدمن لهذه الرتبة في rank_categories) ---
+  async function getRankDiscountPercent(rankId: any, product: any): Promise<number> {
     if (rankId === null || rankId === undefined) return 0;
     try {
       const { data } = await supabase.from("ranks").select("has_discount, discount_percent, is_active").eq("id", rankId).maybeSingle();
       if (!data || !data.is_active || !data.has_discount) return 0;
       const pct = parseFloat(String(data.discount_percent)) || 0;
-      return pct > 0 && pct < 100 ? pct : 0;
+      if (!(pct > 0 && pct < 100)) return 0;
+
+      const { data: scopes } = await supabase.from("rank_categories").select("category_type, category_id").eq("rank_id", rankId);
+      if (!scopes || scopes.length === 0) return 0;
+
+      const subcategoryId = product?.subcategory_id;
+      const parentCategoryId = (product as any)?.subcategories?.category_id;
+      const matched = scopes.some((s: any) =>
+        (s.category_type === "subcategory" && subcategoryId != null && String(s.category_id) === String(subcategoryId)) ||
+        (s.category_type === "category" && parentCategoryId != null && String(s.category_id) === String(parentCategoryId))
+      );
+      return matched ? pct : 0;
     } catch { return 0; }
   }
 
@@ -6377,7 +6389,7 @@ async function startServer() {
 
       const { data: user, error: uErr } = await supabase.from("users").select("*").eq("id", userId).single();
       if (uErr) throw uErr;
-      const { data: product, error: pErr } = await supabase.from("products").select("*").eq("id", productId).single();
+      const { data: product, error: pErr } = await supabase.from("products").select("*, subcategories(category_id)").eq("id", productId).single();
       if (pErr) throw pErr;
       if (!product) return { ok: false, statusCode: 404, error: "غير موجود" };
 
@@ -6461,7 +6473,7 @@ async function startServer() {
       let discountPercent = user.is_vip ? vipDiscountRate : 0;
 
       // خصم رتبة المستخدم (نظام الرتب) — يُطبَّق على المشتريات ويُؤخذ الأعلى بين الخصومات
-      const rankDiscount = await getRankDiscountPercent((user as any).rank_id);
+      const rankDiscount = await getRankDiscountPercent((user as any).rank_id, product);
       if (rankDiscount > 0) discountPercent = Math.max(discountPercent, rankDiscount);
 
       if (stats) {
@@ -10596,7 +10608,13 @@ ${userContext}
       const { data: counts } = await supabase.from("users").select("rank_id");
       const countMap: Record<string, number> = {};
       for (const row of counts || []) { if (row.rank_id != null) countMap[String(row.rank_id)] = (countMap[String(row.rank_id)] || 0) + 1; }
-      res.json(ranks.map((r: any) => ({ ...r, users_count: countMap[String(r.id)] || 0 })));
+      const { data: allScopes } = await supabase.from("rank_categories").select("rank_id, category_type, category_id");
+      const scopeMap: Record<string, any[]> = {};
+      for (const row of allScopes || []) {
+        const k = String(row.rank_id);
+        (scopeMap[k] = scopeMap[k] || []).push({ category_type: row.category_type, category_id: row.category_id });
+      }
+      res.json(ranks.map((r: any) => ({ ...r, users_count: countMap[String(r.id)] || 0, categories: scopeMap[String(r.id)] || [] })));
     } catch (e: any) { safeError(res, e, undefined, req); }
   });
 
@@ -10636,6 +10654,65 @@ ${userContext}
       if (error) throw error;
       await supabase.rpc("recalc_all_user_ranks");
       res.json({ success: true });
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  // نطاق خصم الرتبة: الأقسام/الأقسام الفرعية التي يُطبَّق عليها خصم هذه الرتبة فقط —
+  // أي قسم لا يظهر هنا لا يُطبَّق عليه الخصم أبداً (نفس نمط api_token_categories).
+  app.get("/api/admin/ranks/:id/categories", async (req, res) => {
+    try {
+      const { data, error } = await supabase.from("rank_categories").select("*").eq("rank_id", req.params.id);
+      if (error) throw error;
+      res.json(Array.isArray(data) ? data : []);
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  app.post("/api/admin/ranks/:id/categories", async (req, res) => {
+    try {
+      if (!isValidId(req.params.id)) return res.status(400).json({ error: "معرف غير صحيح" });
+      const { category_type, category_id } = req.body || {};
+      if (!["category", "subcategory"].includes(category_type) || !isValidId(category_id)) {
+        return res.status(400).json({ error: "category_type و category_id مطلوبان وصحيحان" });
+      }
+      const { data, error } = await supabase
+        .from("rank_categories")
+        .insert({ rank_id: req.params.id, category_type, category_id })
+        .select("*")
+        .single();
+      if (error) throw error;
+      res.json(data);
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  app.delete("/api/admin/ranks/:id/categories", async (req, res) => {
+    try {
+      const { category_type, category_id } = req.body || {};
+      const { error } = await supabase
+        .from("rank_categories")
+        .delete()
+        .eq("rank_id", req.params.id)
+        .eq("category_type", category_type)
+        .eq("category_id", category_id);
+      if (error) throw error;
+      res.json({ success: true });
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  // استبدال كامل نطاق خصم الرتبة دفعة واحدة (يُستخدم من واجهة تحرير الرتبة)
+  app.put("/api/admin/ranks/:id/categories", async (req, res) => {
+    try {
+      if (!isValidId(req.params.id)) return res.status(400).json({ error: "معرف غير صحيح" });
+      const items = Array.isArray(req.body?.items) ? req.body.items : [];
+      const clean = items
+        .filter((it: any) => it && ["category", "subcategory"].includes(it.category_type) && isValidId(it.category_id))
+        .map((it: any) => ({ rank_id: req.params.id, category_type: it.category_type, category_id: it.category_id }));
+      const { error: delErr } = await supabase.from("rank_categories").delete().eq("rank_id", req.params.id);
+      if (delErr) throw delErr;
+      if (clean.length > 0) {
+        const { error: insErr } = await supabase.from("rank_categories").insert(clean);
+        if (insErr) throw insErr;
+      }
+      res.json({ success: true, count: clean.length });
     } catch (e: any) { safeError(res, e, undefined, req); }
   });
 
@@ -12744,6 +12821,55 @@ ${responseText}`);
       if (error) throw error;
       res.json({ success: true });
     } catch (e:any) {
+      safeError(res, e, undefined, req);
+    }
+  });
+
+  // تعديل نسبة/مبلغ الربح (markup) دفعة واحدة على كل منتجات أقسام رئيسية و/أو فرعية مختارة —
+  // إجراء سريع من لوحة التحكم. يُطبَّق فقط على منتجات store_type="external_api" (المنتجات
+  // المرتبطة بمزوّد خارجي) لأنها الوحيدة التي تملك أساس تكلفة (price_per_unit) تُحسب النسبة عليه؛
+  // يعاد حساب السعر النهائي فوراً لكل منتج بنفس منطق التعديل الفردي أعلاه.
+  app.post("/api/admin/products/bulk-margin", adminAuth, async (req, res) => {
+    try {
+      const items = Array.isArray(req.body?.items) ? req.body.items : [];
+      const markupType = req.body?.markup_type === "fixed" ? "fixed" : "percent";
+      const markupValue = parseFloat(String(req.body?.markup_value));
+      if (!items.length) return res.status(400).json({ error: "يرجى اختيار قسم واحد على الأقل" });
+      if (isNaN(markupValue)) return res.status(400).json({ error: "قيمة الربح غير صحيحة" });
+
+      const categoryIds = items.filter((it: any) => it?.category_type === "category").map((it: any) => it.category_id);
+      const directSubIds = items.filter((it: any) => it?.category_type === "subcategory").map((it: any) => it.category_id);
+
+      let subcategoryIds: any[] = [...directSubIds];
+      if (categoryIds.length > 0) {
+        const { data: subs, error: subErr } = await supabase.from("subcategories").select("id").in("category_id", categoryIds);
+        if (subErr) throw subErr;
+        subcategoryIds.push(...(subs || []).map((s: any) => s.id));
+      }
+      subcategoryIds = [...new Set(subcategoryIds)];
+      if (subcategoryIds.length === 0) return res.status(400).json({ error: "لا توجد أقسام فرعية ضمن النطاق المختار" });
+
+      const { data: products, error: prodErr } = await supabase
+        .from("products").select("id, price_per_unit, store_type").in("subcategory_id", subcategoryIds);
+      if (prodErr) throw prodErr;
+
+      const apiProducts = (products || []).filter((p: any) => p.store_type === "external_api");
+      let updated = 0;
+      for (const p of apiProducts) {
+        const basePrice = parseFloat(String(p.price_per_unit)) || 0;
+        const updateData: any = { markup_type: markupType, markup_value: markupValue };
+        if (basePrice > 0) {
+          updateData.price = markupType === "fixed"
+            ? +(basePrice + markupValue).toFixed(6)
+            : +(basePrice * (1 + markupValue / 100)).toFixed(6);
+        }
+        const { error: updErr } = await supabase.from("products").update(updateData).eq("id", p.id);
+        if (!updErr) updated++;
+      }
+
+      logAdminActivity({ action_type: "products_bulk_margin", target_model: "products", target_id: subcategoryIds.join(","), details: `تعديل نسبة الربح (${markupType}=${markupValue}) على ${updated} منتج ضمن ${subcategoryIds.length} قسم فرعي`, req }).catch(() => {});
+      res.json({ success: true, updated, skipped: (products || []).length - apiProducts.length, subcategories: subcategoryIds.length });
+    } catch (e: any) {
       safeError(res, e, undefined, req);
     }
   });

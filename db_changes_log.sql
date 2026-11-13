@@ -183,7 +183,23 @@ FOR EACH ROW EXECUTE FUNCTION public.trg_users_recalc_rank();
 SELECT public.recalc_all_user_ranks();
 
 
+-- ---------------------------------------------------------------------
+-- 3) نطاق تطبيق خصم الرتبة على أقسام/أقسام فرعية محددة فقط
+--    (الأقسام غير المختارة لا يُطبَّق عليها خصم الرتبة أبداً)
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.rank_categories (
+  id bigserial primary key,
+  rank_id bigint not null references public.ranks(id) on delete cascade,
+  category_type text not null check (category_type in ('category','subcategory')),
+  category_id bigint not null,
+  created_at timestamptz not null default now(),
+  unique(rank_id, category_type, category_id)
+);
+
+CREATE INDEX IF NOT EXISTS rank_categories_rank_id_idx ON public.rank_categories(rank_id);
+
+
 -- =====================================================================
--- نهاية السجل — آخر تحديث: 2026-11-10
+-- نهاية السجل — آخر تحديث: 2026-11-14
 -- كل الاستعلامات أعلاه idempotent؛ تنفيذها مرة أخرى على نفس القاعدة آمن.
 -- =====================================================================

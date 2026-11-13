@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from "react";
-import { ChevronRight, Plus, Save, Trash2, X, Award, Users, RefreshCw, Percent, Eye, EyeOff, ArrowUp, ArrowDown } from "lucide-react";
+import React, { useEffect, useState, useMemo } from "react";
+import { ChevronRight, Plus, Save, Trash2, X, Award, Users, RefreshCw, Percent, Eye, EyeOff, ArrowUp, ArrowDown, LayoutGrid, ListChecks, ChevronDown } from "lucide-react";
 import AdminImageUpload from "../components/AdminImageUpload";
 import OptimizedImage from "../components/OptimizedImage";
 import { showToast } from "../components/ToastContainer";
@@ -18,6 +18,7 @@ export interface AdminRank {
   is_active: boolean;
   sort_order: number;
   users_count?: number;
+  categories?: { category_type: string; category_id: number }[];
 }
 
 interface Props {
@@ -30,11 +31,20 @@ const emptyForm = (): Partial<AdminRank> => ({
   discount_percent: 0, description: "", benefits: "", is_active: true, sort_order: 0,
 });
 
+type CatScopeItem = { category_type: "category" | "subcategory"; category_id: number };
+
 export default function AdminRanksPage({ adminFetch, onBack }: Props) {
   const [ranks, setRanks] = useState<AdminRank[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Partial<AdminRank> | null>(null);
   const [saving, setSaving] = useState(false);
+
+  // ── نطاق تطبيق الخصم: الأقسام الرئيسية/الفرعية ──
+  const [categories, setCategories] = useState<any[]>([]);
+  const [subcategories, setSubcategories] = useState<any[]>([]);
+  const [scope, setScope] = useState<CatScopeItem[]>([]);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [previewPrice, setPreviewPrice] = useState("100");
 
   const load = async () => {
     setLoading(true);
@@ -47,7 +57,59 @@ export default function AdminRanksPage({ adminFetch, onBack }: Props) {
   };
   useEffect(() => { load(); }, []);
 
-  const openNew = () => setEditing({ ...emptyForm(), sort_order: (ranks[ranks.length - 1]?.sort_order ?? 0) + 1 });
+  useEffect(() => {
+    if (!editing) return;
+    (async () => {
+      try {
+        const [catsRes, subsRes] = await Promise.all([
+          adminFetch("/api/categories?admin=1"), adminFetch("/api/subcategories?admin=1"),
+        ]);
+        setCategories(await catsRes.json().catch(() => []));
+        setSubcategories(await subsRes.json().catch(() => []));
+      } catch { setCategories([]); setSubcategories([]); }
+    })();
+  }, [editing?.id === undefined]);
+
+  useEffect(() => {
+    if (!editing?.id) { setScope([]); return; }
+    (async () => {
+      try {
+        const res = await adminFetch(`/api/admin/ranks/${editing.id}/categories`);
+        const data = await res.json();
+        setScope(Array.isArray(data) ? data.map((d: any) => ({ category_type: d.category_type, category_id: d.category_id })) : []);
+      } catch { setScope([]); }
+    })();
+  }, [editing?.id]);
+
+  const subsByCategory = useMemo(() => {
+    const m: Record<string, any[]> = {};
+    for (const s of subcategories) { (m[String(s.category_id)] = m[String(s.category_id)] || []).push(s); }
+    return m;
+  }, [subcategories]);
+
+  const isSelected = (type: "category" | "subcategory", id: number) =>
+    scope.some(s => s.category_type === type && Number(s.category_id) === Number(id));
+
+  const toggleCategory = (catId: number) => {
+    const subs = subsByCategory[String(catId)] || [];
+    setScope(prev => {
+      const without = prev.filter(s => !(s.category_type === "category" && Number(s.category_id) === catId) && !(s.category_type === "subcategory" && subs.some((sc: any) => Number(sc.id) === Number(s.category_id))));
+      const nowSelected = isSelected("category", catId);
+      return nowSelected ? without : [...without, { category_type: "category", category_id: catId }];
+    });
+  };
+
+  const toggleSubcategory = (subId: number, catId: number) => {
+    setScope(prev => {
+      const withoutParent = prev.filter(s => !(s.category_type === "category" && Number(s.category_id) === catId));
+      const already = withoutParent.some(s => s.category_type === "subcategory" && Number(s.category_id) === subId);
+      return already
+        ? withoutParent.filter(s => !(s.category_type === "subcategory" && Number(s.category_id) === subId))
+        : [...withoutParent, { category_type: "subcategory", category_id: subId }];
+    });
+  };
+
+  const openNew = () => { setEditing({ ...emptyForm(), sort_order: (ranks[ranks.length - 1]?.sort_order ?? 0) + 1 }); setScope([]); };
   const openEdit = (r: AdminRank) => setEditing({ ...r });
 
   const save = async () => {
@@ -69,6 +131,13 @@ export default function AdminRanksPage({ adminFetch, onBack }: Props) {
       });
       const data = await res.json();
       if (!res.ok) { showToast(data?.error || "فشل الحفظ", "error"); setSaving(false); return; }
+      const rankId = editing.id || data.id;
+      if (rankId) {
+        await adminFetch(`/api/admin/ranks/${rankId}/categories`, {
+          method: "PUT",
+          body: JSON.stringify({ items: payload.has_discount ? scope : [] }),
+        }).catch(() => {});
+      }
       showToast(editing.id ? "تم تحديث الرتبة — ستظهر فوراً للمستخدمين" : "تمت إضافة الرتبة", "success");
       setEditing(null);
       load();
@@ -146,6 +215,9 @@ export default function AdminRanksPage({ adminFetch, onBack }: Props) {
                   <span className={`px-1.5 py-0.5 rounded flex items-center gap-0.5 ${r.has_discount && Number(r.discount_percent) > 0 ? "bg-[var(--brand)]/10 text-[var(--brand)]" : "bg-gray-100 text-gray-400"}`}>
                     <Percent size={9} /> {r.has_discount && Number(r.discount_percent) > 0 ? `خصم ${fmt(r.discount_percent)}%` : "بدون خصم"}
                   </span>
+                  {r.has_discount && Number(r.discount_percent) > 0 && (
+                    <span className="bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">{(r.categories?.length || 0)} قسم مُفعَّل له</span>
+                  )}
                   <span className="bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded flex items-center gap-0.5"><Users size={9} /> {r.users_count ?? 0}</span>
                 </div>
               </div>
@@ -209,10 +281,60 @@ export default function AdminRanksPage({ adminFetch, onBack }: Props) {
                   </span>
                 </label>
                 {editing.has_discount && (
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-gray-400">نسبة الخصم (%) على المشتريات</label>
-                    <input type="number" min={0} max={99} step="0.5" value={editing.discount_percent ?? 0} onChange={e => setEditing({ ...editing, discount_percent: e.target.value })}
-                      className="w-full p-3 bg-white border border-gray-200 rounded-lg text-sm font-black outline-none text-center" />
+                  <div className="space-y-3">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-gray-400">نسبة الخصم (%) على المشتريات</label>
+                      <input type="number" min={0} max={99} step="0.5" value={editing.discount_percent ?? 0} onChange={e => setEditing({ ...editing, discount_percent: e.target.value })}
+                        className="w-full p-3 bg-white border border-gray-200 rounded-lg text-sm font-black outline-none text-center" />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-gray-400 flex items-center gap-1"><ListChecks size={12} /> الأقسام التي يُطبَّق عليها الخصم (الأقسام غير المختارة لا تُشمل بالخصم أبداً)</label>
+                      <div className="bg-white border border-gray-200 rounded-lg max-h-56 overflow-y-auto divide-y divide-gray-100">
+                        {categories.length === 0 && <p className="text-[11px] text-gray-400 p-3 text-center">جاري تحميل الأقسام...</p>}
+                        {categories.map((cat: any) => {
+                          const subs = subsByCategory[String(cat.id)] || [];
+                          const catSelected = isSelected("category", cat.id);
+                          const isOpen = !!expanded[cat.id];
+                          return (
+                            <div key={cat.id}>
+                              <div className="flex items-center gap-2 p-2">
+                                <input type="checkbox" checked={catSelected} onChange={() => toggleCategory(cat.id)} className="w-4 h-4 accent-[var(--brand)]" />
+                                <LayoutGrid size={12} className="text-gray-400 shrink-0" />
+                                <span className="text-xs font-bold text-gray-700 flex-1 truncate">{cat.name}</span>
+                                {subs.length > 0 && (
+                                  <button type="button" onClick={() => setExpanded(e => ({ ...e, [cat.id]: !e[cat.id] }))} className="p-1 text-gray-400">
+                                    <ChevronDown size={14} className={`transition-transform ${isOpen ? "rotate-180" : ""}`} />
+                                  </button>
+                                )}
+                              </div>
+                              {isOpen && subs.length > 0 && (
+                                <div className="pr-8 pb-1.5 space-y-1">
+                                  {subs.map((sub: any) => (
+                                    <label key={sub.id} className="flex items-center gap-2 text-[11px] text-gray-600">
+                                      <input type="checkbox" disabled={catSelected} checked={catSelected || isSelected("subcategory", sub.id)}
+                                        onChange={() => toggleSubcategory(sub.id, cat.id)} className="w-3.5 h-3.5 accent-[var(--brand)]" />
+                                      <span className={catSelected ? "opacity-50" : ""}>{sub.name}</span>
+                                    </label>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <p className="text-[10px] text-gray-400">{scope.length === 0 ? "لم يُحدَّد أي قسم — لن يُطبَّق الخصم على أي منتج حالياً." : `مُطبَّق على ${scope.length} قسم/قسم فرعي محدد.`}</p>
+                    </div>
+
+                    <div className="bg-white border border-gray-200 rounded-lg p-2.5 flex items-center gap-2">
+                      <span className="text-[10px] font-bold text-gray-400 whitespace-nowrap">معاينة: سعر تجريبي $</span>
+                      <input type="number" min={0} value={previewPrice} onChange={e => setPreviewPrice(e.target.value)} className="w-20 p-1.5 bg-gray-50 border border-gray-200 rounded-md text-xs font-black text-center outline-none" />
+                      <span className="text-gray-300">⇐</span>
+                      <span className="text-sm font-black text-[var(--brand)]">
+                        {(Number(previewPrice || 0) * (1 - (Number(editing.discount_percent) || 0) / 100)).toFixed(2)}$
+                      </span>
+                      <span className="text-[10px] text-gray-400">بعد خصم {fmt(editing.discount_percent)}%</span>
+                    </div>
                   </div>
                 )}
               </div>
