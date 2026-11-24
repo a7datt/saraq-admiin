@@ -63,6 +63,7 @@ import OptimizedImage from "../components/OptimizedImage";
 import { showDialog, showConfirm, showPromptDialog } from "../components/CustomDialogContainer";
 import AdminUserCard from "../components/AdminUserCard";
 import AdminImageUpload from "../components/AdminImageUpload";
+import DiscountRulesEditor from "../components/DiscountRulesEditor";
 import NameVerificationFields, { NameVerificationValue } from "../components/NameVerificationFields";
 import MoreDetailsSection from "../components/MoreDetailsSection";
 import FieldKeyboardTypePicker, { FieldKeyboardType } from "../components/FieldKeyboardTypePicker";
@@ -5179,15 +5180,12 @@ export default function AdminPage({
                   <button onClick={() => setActiveSubMenu(null)} className="text-gray-400"><X size={22}/></button>
                 </div>
                 <div className="bg-teal-50 rounded-lg p-4 space-y-3">
-                  <h4 className="font-bold text-sm text-teal-700 flex items-center gap-2"><Crown size={14}/>نسبة خصم VIP</h4>
-                  <p className="text-xs text-gray-500">نسبة الخصم التي تُطبَّق تلقائياً على كل طلبات عملاء VIP</p>
-                  <div className="flex gap-2 items-center">
-                    <input type="number" min="0" max="100" step="0.5" value={vipDiscountVal} onChange={e => setVipDiscountVal(e.target.value)} className="flex-1 p-3 bg-white rounded-lg text-sm outline-none border border-teal-100 text-center font-bold" placeholder="مثال: 5" />
-                    <span className="text-gray-500 font-bold text-lg">%</span>
-                    <button disabled={savingDiscount} onClick={async () => { setSavingDiscount(true); await handleUpdateSetting('vip_discount', vipDiscountVal); setSavingDiscount(false); }} className="bg-teal-600 text-white px-5 py-3 rounded-lg text-sm font-bold disabled:opacity-50">
-                      {savingDiscount ? "..." : "حفظ"}
-                    </button>
-                  </div>
+                  <h4 className="font-bold text-sm text-teal-700 flex items-center gap-2"><Crown size={14}/>قواعد خصم VIP</h4>
+                  <DiscountRulesEditor
+                    adminFetch={adminFetch}
+                    ownerType="vip"
+                    hint="قواعد تُطبَّق تلقائياً على طلبات عملاء VIP: نسبة مستقلة لكل قسم أو قسم فرعي أو فرع فرعي أو منتج، أو نسبة واحدة لكل المنتجات."
+                  />
                 </div>
                 <div className="bg-blue-50 rounded-lg p-4 space-y-3">
                   <h4 className="font-bold text-sm text-blue-700 flex items-center gap-2"><Star size={14}/>نسبة عمولة الإحالة</h4>

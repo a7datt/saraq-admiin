@@ -219,3 +219,44 @@ ALTER TABLE public.payment_methods ADD CONSTRAINT payment_methods_qr_mode_check 
 ALTER TABLE public.store_appearance
   ADD COLUMN IF NOT EXISTS marquee_enabled boolean NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS marquee_text text NOT NULL DEFAULT '';
+
+
+-- ==========================================================================
+-- [PHASE-2] 2026-11-24 — محرك قواعد الخصم الموحّد (discount_rules)
+-- ==========================================================================
+CREATE TABLE IF NOT EXISTS public.discount_rules (
+  id bigserial PRIMARY KEY,
+  owner_type text NOT NULL CHECK (owner_type IN ('rank','vip','api_global')),
+  owner_id bigint,
+  scope_type text NOT NULL CHECK (scope_type IN ('all','category','subcategory','sub_sub_category','product')),
+  scope_id bigint,
+  percent numeric(7,3) NOT NULL CHECK (percent >= 0 AND percent < 100),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CHECK ((scope_type = 'all' AND scope_id IS NULL) OR (scope_type <> 'all' AND scope_id IS NOT NULL)),
+  CHECK ((owner_type = 'rank' AND owner_id IS NOT NULL) OR (owner_type <> 'rank' AND owner_id IS NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS discount_rules_unique_idx
+  ON public.discount_rules (owner_type, COALESCE(owner_id,0), scope_type, COALESCE(scope_id,0));
+CREATE INDEX IF NOT EXISTS discount_rules_owner_idx ON public.discount_rules (owner_type, owner_id);
+ALTER TABLE public.discount_rules ENABLE ROW LEVEL SECURITY;
+
+-- تحويل البيانات الحالية بلا تغيير في السلوك:
+-- (1) نطاقات الرتب (rank_categories) -> قواعد بنسبة الرتبة. الرتب التي لا نطاق لها لا تطبّق خصماً حالياً فلا قواعد لها.
+INSERT INTO public.discount_rules (owner_type, owner_id, scope_type, scope_id, percent)
+SELECT 'rank', rc.rank_id, rc.category_type, rc.category_id, r.discount_percent
+FROM public.rank_categories rc JOIN public.ranks r ON r.id = rc.rank_id
+WHERE r.has_discount AND r.discount_percent > 0 AND r.discount_percent < 100 AND rc.category_type IN ('category','subcategory')
+ON CONFLICT DO NOTHING;
+-- (2) VIP: settings.vip_discount (أو 5% الافتراضي بالكود) -> قاعدة "كل المنتجات"
+INSERT INTO public.discount_rules (owner_type, owner_id, scope_type, scope_id, percent)
+SELECT 'vip', NULL, 'all', NULL,
+  LEAST(99.999, GREATEST(0, COALESCE(NULLIF((SELECT value FROM public.settings WHERE key='vip_discount' LIMIT 1),'')::numeric, 5)))
+WHERE COALESCE(NULLIF((SELECT value FROM public.settings WHERE key='vip_discount' LIMIT 1),'')::numeric, 5) > 0
+ON CONFLICT DO NOTHING;
+-- (3) الـ API العام: settings.public_api_discount_percent -> قاعدة "كل المنتجات" إن كانت > 0
+INSERT INTO public.discount_rules (owner_type, owner_id, scope_type, scope_id, percent)
+SELECT 'api_global', NULL, 'all', NULL, v
+FROM (SELECT NULLIF((SELECT value FROM public.settings WHERE key='public_api_discount_percent' LIMIT 1),'')::numeric AS v) t
+WHERE v > 0 AND v < 100
+ON CONFLICT DO NOTHING;

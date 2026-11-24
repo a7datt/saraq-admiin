@@ -1,3 +1,4 @@
+import DiscountRulesEditor from "../components/DiscountRulesEditor";
 import React, { useState, useEffect, useMemo } from "react";
 import {
   Percent,
@@ -158,7 +159,6 @@ const AdminPublicApiSettingsPage: React.FC<Props> = ({ adminFetch }) => {
     setSaveMsg("");
     try {
       const body: any = {
-        discount_percent: parseFloat(discountPercent) || 0,
         rate_limit_max: parseInt(rateLimitMax) || 120,
         rate_limit_window_sec: parseInt(rateLimitWindow) || 60,
         webhook_url: webhookUrl.trim(),
@@ -432,14 +432,12 @@ const AdminPublicApiSettingsPage: React.FC<Props> = ({ adminFetch }) => {
       {tab === "settings" && (
         <div className="space-y-3">
           <div className="bg-white rounded-lg border border-gray-100 shadow-sm p-3 space-y-2">
-            <label className="text-xs font-bold text-gray-600 flex items-center gap-1.5"><Percent size={14} /> نسبة الخصم العامة على طلبات الـ API (%)</label>
-            <input
-              type="number" min={0} max={99} step={0.5}
-              value={discountPercent}
-              onChange={(e) => setDiscountPercent(e.target.value)}
-              className="w-full bg-gray-50 border border-gray-100 rounded-md px-3 py-2.5 text-xs outline-none"
+            <label className="text-xs font-bold text-gray-600 flex items-center gap-1.5"><Percent size={14} /> قواعد خصم طلبات الـ API</label>
+            <DiscountRulesEditor
+              adminFetch={adminFetch}
+              ownerType="api_global"
+              hint="تحدّد نسبة الخصم لكل منتج أو قسم مطلوب عبر الـ API (أو كل المنتجات). الأسعار التي يرجعها الـ API تُحسب بهذه القواعد. نسبة خصم مخصصة لمستخدم معيّن (من صفحة المستخدم) تتفوّق عليها."
             />
-            <p className="text-[10px] text-gray-400">تُطبَّق تلقائياً على كل طلبات الـ API، ما لم يكن للمستخدم نسبة خصم مخصصة أعلى منها.</p>
           </div>
 
           <div className="bg-white rounded-lg border border-gray-100 shadow-sm p-3 space-y-2">

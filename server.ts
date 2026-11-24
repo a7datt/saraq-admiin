@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express from "express";
+import { loadDiscountRules, resolveDiscountPercent, sanitizeRulesInput, maxDiscountPercentForCost, pickMostSpecificRule } from "./discountEngine";
 import helmet from "helmet";
 import hpp from "hpp";
 import { createServer as createViteServer } from "vite";
@@ -4249,21 +4250,32 @@ async function startServer() {
     return Number.isFinite(v) && v > 0 && v < 100 ? v : 0;
   };
 
-  // النسبة الفعلية لتوكن معيّن: نسبة التوكن المخصصة إن وُجدت، وإلا النسبة العامة لإعدادات الـ API
-  const getEffectiveApiDiscountPercent = async (tokenId: number | string | null | undefined): Promise<number> => {
-    const globalPercent = await getPublicApiDiscountPercent();
-    if (tokenId == null) return globalPercent;
-    try {
-      const { data: tokenRow, error } = await supabase
-        .from("api_tokens").select("custom_discount_percent").eq("id", tokenId).maybeSingle();
-      if (error) return globalPercent; // العمود قد لا يكون موجوداً بعد في قاعدة البيانات
-      if (tokenRow && tokenRow.custom_discount_percent !== null && tokenRow.custom_discount_percent !== undefined) {
-        const custom = Number(tokenRow.custom_discount_percent);
-        if (Number.isFinite(custom) && custom >= 0 && custom < 100) return custom;
-      }
-    } catch { /* تجاهل والعودة للنسبة العامة */ }
-    return globalPercent;
+  // [PHASE-2] خصم الـ API لكل منتج: نسبة التوكن المخصصة (custom_discount_percent) إن وُجدت تُطبَّق على كل
+  // المنتجات (مع حماية التكلفة)، وإلا تُطبَّق قواعد api_global — القاعدة الأدق فقط.
+  const getApiDiscountResolver = async (tokenId: number | string | null | undefined): Promise<(product: any) => number> => {
+    let custom: number | null = null;
+    if (tokenId != null) {
+      try {
+        const { data: tokenRow, error } = await supabase
+          .from("api_tokens").select("custom_discount_percent").eq("id", tokenId).maybeSingle();
+        if (!error && tokenRow && tokenRow.custom_discount_percent !== null && tokenRow.custom_discount_percent !== undefined) {
+          const c = Number(tokenRow.custom_discount_percent);
+          if (Number.isFinite(c) && c >= 0 && c < 100) custom = c;
+        }
+      } catch { /* العمود قد لا يكون موجوداً بعد */ }
+    }
+    if (custom !== null) {
+      const flat = custom;
+      return (product: any) => {
+        const cap = maxDiscountPercentForCost(product);
+        return cap !== null && flat > cap ? cap : flat;
+      };
+    }
+    const rules = await loadDiscountRules(supabase, "api_global", null);
+    return (product: any) => resolveDiscountPercent(rules, product).percent;
   };
+  const getApiDiscountPercentForProduct = async (tokenId: number | string | null | undefined, product: any): Promise<number> =>
+    (await getApiDiscountResolver(tokenId))(product);
 
   // ── Rate Limiting قابل للتعديل من لوحة التحكم لكل توكن API ──
   const clientApiRateStore = new Map<string, { count: number; resetAt: number }>();
@@ -5015,11 +5027,9 @@ async function startServer() {
       const { discount_percent, rate_limit_max, rate_limit_window_sec, webhook_url, default_scope } = req.body || {};
       const rows: { key: string; value: string }[] = [];
 
-      if (discount_percent !== undefined) {
-        const v = Number(discount_percent);
-        if (!Number.isFinite(v) || v < 0 || v >= 100) return res.status(400).json({ error: "نسبة الخصم غير صحيحة (0-99)" });
-        rows.push({ key: "public_api_discount_percent", value: String(v) });
-      }
+      // [PHASE-2] خصم الـ API صار قواعد (discount_rules / owner=api_global) تُدار عبر /api/admin/discount-rules؛
+      // لذلك يُتجاهل discount_percent هنا حتى لا يُنشئ تعارضاً مع القواعد.
+      void discount_percent;
       if (rate_limit_max !== undefined) {
         const v = parseInt(rate_limit_max);
         if (!Number.isInteger(v) || v < 1) return res.status(400).json({ error: "الحد الأقصى للطلبات غير صحيح" });
@@ -6358,21 +6368,11 @@ async function startServer() {
   async function getRankDiscountPercent(rankId: any, product: any): Promise<number> {
     if (rankId === null || rankId === undefined) return 0;
     try {
-      const { data } = await supabase.from("ranks").select("has_discount, discount_percent, is_active").eq("id", rankId).maybeSingle();
+      const { data } = await supabase.from("ranks").select("has_discount, is_active").eq("id", rankId).maybeSingle();
       if (!data || !data.is_active || !data.has_discount) return 0;
-      const pct = parseFloat(String(data.discount_percent)) || 0;
-      if (!(pct > 0 && pct < 100)) return 0;
-
-      const { data: scopes } = await supabase.from("rank_categories").select("category_type, category_id").eq("rank_id", rankId);
-      if (!scopes || scopes.length === 0) return 0;
-
-      const subcategoryId = product?.subcategory_id;
-      const parentCategoryId = (product as any)?.subcategories?.category_id;
-      const matched = scopes.some((s: any) =>
-        (s.category_type === "subcategory" && subcategoryId != null && String(s.category_id) === String(subcategoryId)) ||
-        (s.category_type === "category" && parentCategoryId != null && String(s.category_id) === String(parentCategoryId))
-      );
-      return matched ? pct : 0;
+      // [PHASE-2] محرك القواعد: القاعدة الأدق للمنتج فقط (منتج > فرع فرعي > فرعي > رئيسي > الكل) + حماية التكلفة
+      const rules = await loadDiscountRules(supabase, "rank", rankId);
+      return resolveDiscountPercent(rules, product).percent;
     } catch { return 0; }
   }
 
@@ -6468,9 +6468,10 @@ async function startServer() {
       let total = unitPrice * safeQty;
 
       const { data: stats } = await supabase.from("user_stats").select("*").eq("user_id", userId).single();
-      const { data: vipDiscountSetting } = await supabase.from("settings").select("value").eq("key", "vip_discount").single();
-      const vipDiscountRate = vipDiscountSetting ? parseFloat(vipDiscountSetting.value) || 5 : 5;
-      let discountPercent = user.is_vip ? vipDiscountRate : 0;
+      // [PHASE-2] خصم VIP من محرك القواعد (قاعدة لكل قسم/قسم فرعي/فرع فرعي/منتج أو كل المنتجات).
+      // طريقة الدمج مع باقي الخصومات لم تتغير: يُؤخذ الأعلى بين (VIP، الرتبة، مدى الحياة، المؤقت، لمنتج واحد، API).
+      const vipRules = user.is_vip ? await loadDiscountRules(supabase, "vip", null) : [];
+      let discountPercent = user.is_vip ? resolveDiscountPercent(vipRules, product).percent : 0;
 
       // خصم رتبة المستخدم (نظام الرتب) — يُطبَّق على المشتريات ويُؤخذ الأعلى بين الخصومات
       const rankDiscount = await getRankDiscountPercent((user as any).rank_id, product);
@@ -6492,18 +6493,8 @@ async function startServer() {
 
       // نسبة خصم على طلبات الـ API الخارجية — تُطبَّق نسبة التوكن المخصصة إن وُجدت، وإلا النسبة العامة لإعدادات الـ API
       if (source === "external_api") {
-        let apiDiscountPercent = await getPublicApiDiscountPercent();
-        const reqTokenId = (req as any)?.apiTokenId;
-        if (reqTokenId != null) {
-          try {
-            const { data: tokenRow, error: tokenErr } = await supabase
-              .from("api_tokens").select("custom_discount_percent").eq("id", reqTokenId).maybeSingle();
-            if (!tokenErr && tokenRow && tokenRow.custom_discount_percent !== null && tokenRow.custom_discount_percent !== undefined) {
-              const custom = Number(tokenRow.custom_discount_percent);
-              if (Number.isFinite(custom) && custom >= 0 && custom < 100) apiDiscountPercent = custom;
-            }
-          } catch { /* العمود قد لا يكون موجوداً بعد — نستخدم النسبة العامة */ }
-        }
+        // [PHASE-2] خصم الـ API: نسبة التوكن المخصصة (إن وُجدت) تتفوق، وإلا قواعد api_global (الأدق للمنتج)
+        const apiDiscountPercent = await getApiDiscountPercentForProduct((req as any)?.apiTokenId, product);
         if (apiDiscountPercent > 0) discountPercent = Math.max(discountPercent, apiDiscountPercent);
       }
 
@@ -6952,8 +6943,8 @@ async function startServer() {
 
       const checks = await Promise.all((data || []).map((p: any) => isProductAllowedForToken(tokenId, p.id)));
       const allowed = (data || []).filter((_: any, i: number) => checks[i]);
-      const apiDiscountPercent = await getEffectiveApiDiscountPercent(tokenId);
-      res.json({ status: "OK", data: allowed.map((p: any) => mapProductForClientApi(p, !!base, apiDiscountPercent)) });
+      const apiDiscountFor = await getApiDiscountResolver(tokenId);
+      res.json({ status: "OK", data: allowed.map((p: any) => mapProductForClientApi(p, !!base, apiDiscountFor(p))) });
     } catch (e: any) {
       safeError(res, e, undefined, req);
     }
@@ -6970,12 +6961,12 @@ async function startServer() {
 
       const checks = await Promise.all((products || []).map((p: any) => isProductAllowedForToken(tokenId, p.id)));
       const allowedProducts = (products || []).filter((_: any, i: number) => checks[i]);
-      const apiDiscountPercent = await getEffectiveApiDiscountPercent(tokenId);
+      const apiDiscountFor = await getApiDiscountResolver(tokenId);
 
       res.json({
         status: "OK",
         categories: subSubCategories || [],
-        products: allowedProducts.map((p: any) => mapProductForClientApi(p, false, apiDiscountPercent)),
+        products: allowedProducts.map((p: any) => mapProductForClientApi(p, false, apiDiscountFor(p))),
       });
     } catch (e: any) {
       safeError(res, e, undefined, req);
@@ -10652,6 +10643,7 @@ ${userContext}
       if ((count || 0) <= 1) return res.status(400).json({ error: "لا يمكن حذف آخر رتبة في النظام" });
       const { error } = await supabase.from("ranks").delete().eq("id", req.params.id);
       if (error) throw error;
+      await supabase.from("discount_rules").delete().eq("owner_type", "rank").eq("owner_id", req.params.id); // [PHASE-2]
       await supabase.rpc("recalc_all_user_ranks");
       res.json({ success: true });
     } catch (e: any) { safeError(res, e, undefined, req); }
@@ -10713,6 +10705,211 @@ ${userContext}
         if (insErr) throw insErr;
       }
       res.json({ success: true, count: clean.length });
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // [PHASE-2] محرك قواعد الخصم — إدارة القواعد + أدوات اختيار النطاق + تعديل الربح بالجملة
+  // ═══════════════════════════════════════════════════════════════════════════
+  const DISCOUNT_PRODUCT_COLS = "id, name, price, price_per_unit, store_type, default_profit, subcategory_id, sub_sub_category_id, category_id, markup_type, markup_value";
+
+  // منتجات نطاق واحد (all | category | subcategory | sub_sub_category | product) — مع ترقيم صفحات كامل
+  async function fetchProductsForScope(scopeType: string, scopeId: any): Promise<any[]> {
+    let subIds: any[] | null = null;
+    if (scopeType === "category") {
+      const { data: subs, error } = await supabase.from("subcategories").select("id").eq("category_id", scopeId);
+      if (error) throw error;
+      subIds = (subs || []).map((x: any) => x.id);
+      if (subIds.length === 0) return [];
+    }
+    const rows = await fetchAllRowsPaged((from, to) => {
+      let q = supabase.from("products").select(DISCOUNT_PRODUCT_COLS + ", subcategories(category_id)");
+      if (scopeType === "product") q = q.eq("id", scopeId);
+      else if (scopeType === "sub_sub_category") q = q.eq("sub_sub_category_id", scopeId);
+      else if (scopeType === "subcategory") q = q.eq("subcategory_id", scopeId);
+      else if (scopeType === "category") q = q.in("subcategory_id", subIds as any[]);
+      return q.order("id", { ascending: true }).range(from, to);
+    });
+    return rows as any[];
+  }
+
+  async function fetchProductsForScopes(scopes: { scope_type: string; scope_id: any }[]): Promise<any[]> {
+    if (scopes.some(sc => sc.scope_type === "all")) return fetchProductsForScope("all", null);
+    const map = new Map<string, any>();
+    for (const sc of scopes) {
+      const rows = await fetchProductsForScope(sc.scope_type, sc.scope_id);
+      for (const r of rows) map.set(String(r.id), r);
+    }
+    return [...map.values()];
+  }
+
+  async function discountProductNames(rules: { scope_type: string; scope_id: any }[]): Promise<Record<string, string>> {
+    const ids = rules.filter(r => r.scope_type === "product").map(r => r.scope_id);
+    if (ids.length === 0) return {};
+    const { data } = await supabase.from("products").select("id, name").in("id", ids);
+    const out: Record<string, string> = {};
+    (data || []).forEach((p: any) => { out[String(p.id)] = p.name; });
+    return out;
+  }
+
+  const isDiscountOwner = (t: any) => ["rank", "vip", "api_global"].includes(t);
+
+  app.get("/api/admin/discount-rules", async (req, res) => {
+    try {
+      const ownerType = String(req.query.owner_type || "");
+      if (!isDiscountOwner(ownerType)) return res.status(400).json({ error: "نوع المالك غير صحيح" });
+      let ownerId: number | null = null;
+      if (ownerType === "rank") {
+        if (!isValidId(req.query.owner_id)) return res.status(400).json({ error: "معرف الرتبة غير صحيح" });
+        ownerId = Number(req.query.owner_id);
+      }
+      const rules = await loadDiscountRules(supabase, ownerType as any, ownerId);
+      res.json({ rules, product_names: await discountProductNames(rules) });
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  // استبدال كامل لمجموعة قواعد مالك واحد (رتبة | vip | api_global) + تحذير خسارة لكل قاعدة تنزل بالسعر تحت التكلفة
+  app.put("/api/admin/discount-rules", async (req, res) => {
+    try {
+      const ownerType = String(req.body?.owner_type || "");
+      if (!isDiscountOwner(ownerType)) return res.status(400).json({ error: "نوع المالك غير صحيح" });
+      let ownerId: number | null = null;
+      if (ownerType === "rank") {
+        if (!isValidId(req.body?.owner_id)) return res.status(400).json({ error: "معرف الرتبة غير صحيح" });
+        ownerId = Number(req.body.owner_id);
+      }
+      let clean: ReturnType<typeof sanitizeRulesInput>;
+      try { clean = sanitizeRulesInput(req.body?.items); } catch (err: any) { return res.status(400).json({ error: err.message }); }
+
+      const oldRules = await loadDiscountRules(supabase, ownerType as any, ownerId);
+      let del = supabase.from("discount_rules").delete().eq("owner_type", ownerType);
+      del = ownerId === null ? del.is("owner_id", null) : del.eq("owner_id", ownerId);
+      const { error: delErr } = await del;
+      if (delErr) throw delErr;
+      if (clean.length > 0) {
+        const { error: insErr } = await supabase.from("discount_rules").insert(
+          clean.map(r => ({ owner_type: ownerType, owner_id: ownerId, scope_type: r.scope_type, scope_id: r.scope_id, percent: r.percent }))
+        );
+        if (insErr) {
+          // استرجاع القواعد القديمة كي لا يبقى المالك بلا قواعد عند فشل الإدراج
+          if (oldRules.length > 0) {
+            await supabase.from("discount_rules").insert(oldRules.map(r => ({ owner_type: ownerType, owner_id: ownerId, scope_type: r.scope_type, scope_id: r.scope_id, percent: r.percent })));
+          }
+          throw insErr;
+        }
+      }
+
+      // مزامنة قيم العرض القديمة (شارة الرتبة، إعدادات VIP والـ API) مع أعلى نسبة/قاعدة "الكل"
+      const maxPct = clean.reduce((m, r) => Math.max(m, r.percent), 0);
+      const allPct = clean.find(r => r.scope_type === "all")?.percent ?? 0;
+      try {
+        if (ownerType === "rank") await supabase.from("ranks").update({ discount_percent: maxPct }).eq("id", ownerId);
+        else if (ownerType === "vip") await supabase.from("settings").upsert({ key: "vip_discount", value: String(maxPct) }, { onConflict: "key" });
+        else if (ownerType === "api_global") await supabase.from("settings").upsert({ key: "public_api_discount_percent", value: String(allPct) }, { onConflict: "key" });
+      } catch { /* مزامنة اختيارية */ }
+
+      // تحذير الخسارة: منتجات تتجاوز نسبتها الفعلية ما يُبقي السعر فوق التكلفة (ستُقصّ تلقائياً عند الشراء)
+      const warnings: any[] = [];
+      let warnCount = 0;
+      if (clean.some(r => r.percent > 0)) {
+        const products = await fetchProductsForScopes(clean.some(r => r.scope_type === "all") ? [{ scope_type: "all", scope_id: null }] : clean.map(r => ({ scope_type: r.scope_type, scope_id: r.scope_id })));
+        const ruleObjs = clean.map(r => ({ owner_type: ownerType as any, owner_id: ownerId, scope_type: r.scope_type, scope_id: r.scope_id, percent: r.percent }));
+        for (const p of products) {
+          const r = resolveDiscountPercent(ruleObjs, p);
+          if (r.capped) {
+            warnCount++;
+            if (warnings.length < 15) warnings.push({ id: p.id, name: p.name, requested: r.rule?.percent, max_allowed: r.cap });
+          }
+        }
+      }
+      logAdminActivity({ action_type: "discount_rules_updated", target_model: "discount_rules", target_id: `${ownerType}:${ownerId ?? "-"}`, details: `تحديث قواعد الخصم (${ownerType}${ownerId ? " #" + ownerId : ""}) — ${clean.length} قاعدة`, req }).catch(() => {});
+      const savedRules = await loadDiscountRules(supabase, ownerType as any, ownerId);
+      res.json({ success: true, rules: savedRules, product_names: await discountProductNames(savedRules), warning_count: warnCount, warnings });
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  // شجرة الأقسام لواجهة اختيار النطاق (المنتجات تُبحث عبر discount-scope-search لكثرتها)
+  app.get("/api/admin/discount-scope-tree", async (req, res) => {
+    try {
+      const [cats, subs, subsubs] = await Promise.all([
+        fetchAllRowsPaged((f, t) => supabase.from("categories").select("id, name").order("id").range(f, t)),
+        fetchAllRowsPaged((f, t) => supabase.from("subcategories").select("id, name, category_id").order("id").range(f, t)),
+        fetchAllRowsPaged((f, t) => supabase.from("sub_sub_categories").select("id, name, subcategory_id").order("id").range(f, t)),
+      ]);
+      res.json({ categories: cats, subcategories: subs, sub_sub_categories: subsubs });
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  app.get("/api/admin/discount-scope-search", async (req, res) => {
+    try {
+      const q = String(req.query.q || "").trim().slice(0, 60).replace(/[%_,()]/g, "");
+      if (q.length < 2) return res.json([]);
+      const { data, error } = await supabase.from("products").select("id, name, subcategory_id").ilike("name", `%${q}%`).order("id").limit(40);
+      if (error) throw error;
+      res.json(data || []);
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  // ─── تعديل نسبة الربح بالجملة (معاينة ثم تأكيد) — منتجات external_api فقط (لها أساس تكلفة) ───
+  function computeBulkProfitChange(p: any, op: string, type: string, value: number) {
+    const base = parseFloat(String(p.price_per_unit)) || 0;
+    if (p.store_type !== "external_api" || !(base > 0)) return null;
+    const oldPrice = parseFloat(String(p.price)) || 0;
+    const current = type === "fixed" ? oldPrice - base : (oldPrice / base - 1) * 100;
+    let m = op === "set" ? value : op === "increase" ? current + value : current - value;
+    m = Math.max(0, m);
+    const newPrice = type === "fixed" ? +(base + m).toFixed(6) : +(base * (1 + m / 100)).toFixed(6);
+    return { base, oldPrice, newPrice, newMarkup: +m.toFixed(6) };
+  }
+  function parseBulkProfitBody(body: any) {
+    const op = ["set", "increase", "decrease"].includes(body?.op) ? body.op : "";
+    const type = body?.markup_type === "fixed" ? "fixed" : "percent";
+    const value = Number(body?.value);
+    if (!op) throw new Error("نوع العملية غير صحيح");
+    if (!Number.isFinite(value) || value < 0 || value > 100000) throw new Error("القيمة غير صحيحة");
+    const rawScopes = Array.isArray(body?.scopes) ? body.scopes : [];
+    if (rawScopes.length === 0) throw new Error("يرجى اختيار نطاق واحد على الأقل");
+    const scopes = sanitizeRulesInput(rawScopes.map((s: any) => ({ scope_type: s?.scope_type, scope_id: s?.scope_id, percent: 0 })));
+    return { op, type, value, scopes: scopes.map(s => ({ scope_type: s.scope_type, scope_id: s.scope_id })) };
+  }
+
+  app.post("/api/admin/products/bulk-profit/preview", adminAuth, async (req, res) => {
+    try {
+      let parsed; try { parsed = parseBulkProfitBody(req.body); } catch (err: any) { return res.status(400).json({ error: err.message }); }
+      const products = await fetchProductsForScopes(parsed.scopes);
+      const changes: any[] = [];
+      for (const p of products) {
+        const c = computeBulkProfitChange(p, parsed.op, parsed.type, parsed.value);
+        if (c) changes.push({ id: p.id, name: p.name, ...c });
+      }
+      const step = Math.max(1, Math.floor(changes.length / 8));
+      const samples = changes.filter((_, i) => i % step === 0).slice(0, 8).map(c => ({ id: c.id, name: c.name, old_price: c.oldPrice, new_price: c.newPrice }));
+      res.json({ total_in_scope: products.length, affected: changes.length, skipped: products.length - changes.length, samples });
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  app.post("/api/admin/products/bulk-profit/apply", adminAuth, async (req, res) => {
+    try {
+      let parsed; try { parsed = parseBulkProfitBody(req.body); } catch (err: any) { return res.status(400).json({ error: err.message }); }
+      const products = await fetchProductsForScopes(parsed.scopes);
+      const changes: { id: any; newPrice: number; newMarkup: number }[] = [];
+      for (const p of products) {
+        const c = computeBulkProfitChange(p, parsed.op, parsed.type, parsed.value);
+        if (c) changes.push({ id: p.id, newPrice: c.newPrice, newMarkup: c.newMarkup });
+      }
+      // حماية: يجب أن يطابق عدد المنتجات المتأثرة ما رآه الأدمن في المعاينة
+      if (req.body?.expected_count !== undefined && Number(req.body.expected_count) !== changes.length) {
+        return res.status(409).json({ error: "تغيّرت المنتجات منذ المعاينة، أعد المعاينة ثم أكّد" });
+      }
+      let updated = 0;
+      for (let i = 0; i < changes.length; i += 25) {
+        const results = await Promise.all(changes.slice(i, i + 25).map(c =>
+          supabase.from("products").update({ markup_type: parsed.type, markup_value: c.newMarkup, price: c.newPrice }).eq("id", c.id)
+        ));
+        updated += results.filter(r => !r.error).length;
+      }
+      logAdminActivity({ action_type: "products_bulk_profit", target_model: "products", target_id: "bulk", details: `تعديل نسبة الربح (${parsed.op} ${parsed.type}=${parsed.value}) على ${updated} منتج`, req }).catch(() => {});
+      res.json({ success: true, updated, failed: changes.length - updated });
     } catch (e: any) { safeError(res, e, undefined, req); }
   });
 

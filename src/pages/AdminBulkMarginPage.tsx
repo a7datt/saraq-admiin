@@ -1,162 +1,120 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { ChevronRight, Percent, LayoutGrid, ChevronDown, Save } from "lucide-react";
+import React, { useState } from "react";
+import { ChevronRight, Percent, Eye, Check } from "lucide-react";
 import { showToast } from "../components/ToastContainer";
+import DiscountScopePicker, { ScopeSel } from "../components/DiscountScopePicker";
 
 interface Props {
   adminFetch: (url: string, options?: RequestInit) => Promise<Response>;
   onBack: () => void;
 }
 
-type ScopeItem = { category_type: "category" | "subcategory"; category_id: number };
+type Preview = { total_in_scope: number; affected: number; skipped: number; samples: { id: number; name: string; old_price: number; new_price: number }[] };
 
+/**
+ * [PHASE-2] تعديل نسبة الربح بالجملة: نفس اختيار النطاق (كل المنتجات / أقسام / فروع / منتجات محددة)،
+ * رفع أو خفض أو ضبط النسبة، ثم معاينة (عدد المتأثرة + أمثلة قبل/بعد) وزر تأكيد.
+ * يطبَّق على منتجات المزوّد الخارجي فقط (لها أساس تكلفة)؛ البقية تُتخطّى وتظهر بالمعاينة.
+ */
 export default function AdminBulkMarginPage({ adminFetch, onBack }: Props) {
-  const [categories, setCategories] = useState<any[]>([]);
-  const [subcategories, setSubcategories] = useState<any[]>([]);
-  const [scope, setScope] = useState<ScopeItem[]>([]);
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [scopes, setScopes] = useState<ScopeSel[]>([]);
+  const [op, setOp] = useState<"set" | "increase" | "decrease">("increase");
   const [markupType, setMarkupType] = useState<"percent" | "fixed">("percent");
-  const [markupValue, setMarkupValue] = useState("0");
-  const [previewBase, setPreviewBase] = useState("100");
-  const [saving, setSaving] = useState(false);
+  const [value, setValue] = useState("");
+  const [preview, setPreview] = useState<Preview | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const [catsRes, subsRes] = await Promise.all([
-          adminFetch("/api/categories?admin=1"), adminFetch("/api/subcategories?admin=1"),
-        ]);
-        setCategories(await catsRes.json().catch(() => []));
-        setSubcategories(await subsRes.json().catch(() => []));
-      } catch { setCategories([]); setSubcategories([]); }
-    })();
-  }, []);
-
-  const subsByCategory = useMemo(() => {
-    const m: Record<string, any[]> = {};
-    for (const s of subcategories) { (m[String(s.category_id)] = m[String(s.category_id)] || []).push(s); }
-    return m;
-  }, [subcategories]);
-
-  const isSelected = (type: "category" | "subcategory", id: number) =>
-    scope.some(s => s.category_type === type && Number(s.category_id) === Number(id));
-
-  const toggleCategory = (catId: number) => {
-    const subs = subsByCategory[String(catId)] || [];
-    setScope(prev => {
-      const without = prev.filter(s => !(s.category_type === "category" && Number(s.category_id) === catId) && !(s.category_type === "subcategory" && subs.some((sc: any) => Number(sc.id) === Number(s.category_id))));
-      return isSelected("category", catId) ? without : [...without, { category_type: "category", category_id: catId }];
-    });
+  const body = () => ({
+    scopes: scopes.map(s => ({ scope_type: s.scope_type, scope_id: s.scope_id })),
+    op, markup_type: markupType, value: Number(value),
+  });
+  const valid = () => {
+    if (scopes.length === 0) { showToast("اختر نطاقاً واحداً على الأقل", "error"); return false; }
+    if (value === "" || !Number.isFinite(Number(value)) || Number(value) < 0) { showToast("أدخل قيمة صحيحة", "error"); return false; }
+    return true;
   };
+  const invalidate = () => setPreview(null);
 
-  const toggleSubcategory = (subId: number, catId: number) => {
-    setScope(prev => {
-      const withoutParent = prev.filter(s => !(s.category_type === "category" && Number(s.category_id) === catId));
-      const already = withoutParent.some(s => s.category_type === "subcategory" && Number(s.category_id) === subId);
-      return already
-        ? withoutParent.filter(s => !(s.category_type === "subcategory" && Number(s.category_id) === subId))
-        : [...withoutParent, { category_type: "subcategory", category_id: subId }];
-    });
+  const runPreview = async () => {
+    if (!valid()) return;
+    setBusy(true);
+    try {
+      const res = await adminFetch("/api/admin/products/bulk-profit/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body()) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) showToast(data?.error || "فشلت المعاينة", "error"); else setPreview(data);
+    } catch { showToast("خطأ في الاتصال", "error"); }
+    setBusy(false);
   };
-
-  const previewResult = useMemo(() => {
-    const base = Number(previewBase) || 0;
-    const v = Number(markupValue) || 0;
-    return markupType === "fixed" ? base + v : base * (1 + v / 100);
-  }, [previewBase, markupValue, markupType]);
 
   const apply = async () => {
-    if (scope.length === 0) { showToast("يرجى اختيار قسم واحد على الأقل", "error"); return; }
-    if (markupValue === "" || isNaN(Number(markupValue))) { showToast("أدخل نسبة/مبلغ ربح صحيح", "error"); return; }
-    setSaving(true);
+    if (!preview || preview.affected === 0) return;
+    setBusy(true);
     try {
-      const res = await adminFetch("/api/admin/products/bulk-margin", {
-        method: "POST",
-        body: JSON.stringify({ items: scope, markup_type: markupType, markup_value: Number(markupValue) }),
-      });
+      const res = await adminFetch("/api/admin/products/bulk-profit/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body(), expected_count: preview.affected }) });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) { showToast(data?.error || "فشل التطبيق", "error"); setSaving(false); return; }
-      showToast(`تم تعديل الربح على ${data.updated} منتج${data.skipped ? ` (تم تجاهل ${data.skipped} منتج غير مرتبط بمزوّد خارجي)` : ""}`, "success");
+      if (!res.ok) showToast(data?.error || "فشل التطبيق", "error");
+      else { showToast(`تم تعديل ${data.updated} منتج${data.failed ? ` (فشل ${data.failed})` : ""}`, "success"); setPreview(null); }
     } catch { showToast("خطأ في الاتصال", "error"); }
-    setSaving(false);
+    setBusy(false);
   };
 
+  const unit = markupType === "percent" ? "%" : "$";
+  const fmt = (n: number) => (Math.round(n * 1e6) / 1e6).toString();
+
   return (
-    <div className="space-y-4" dir="rtl">
-      <div className="flex items-center gap-2">
-        <button onClick={onBack} className="text-gray-500 hover:text-gray-700 p-1 -m-1"><ChevronRight size={22} /></button>
-        <h2 className="font-black text-lg text-gray-800 flex items-center gap-2"><Percent size={18} className="text-[var(--brand)]" /> تعديل نسبة الربح</h2>
+    <div className="space-y-4 pb-20" dir="rtl">
+      <button onClick={onBack} className="flex items-center gap-1 text-xs font-bold text-gray-500"><ChevronRight size={16} /> رجوع</button>
+      <h2 className="font-black text-gray-800 flex items-center gap-2"><Percent size={18} className="text-teal-600" /> تعديل نسبة الربح بالجملة</h2>
+
+      <div className="bg-white border border-gray-100 rounded-lg p-3 space-y-3">
+        <p className="text-xs font-bold text-gray-600">1) النطاق</p>
+        <DiscountScopePicker adminFetch={adminFetch} selected={scopes} onChange={s => { setScopes(s); invalidate(); }} />
       </div>
 
-      <p className="text-[11px] text-gray-500 leading-relaxed bg-gray-50 border border-gray-200 rounded-lg p-3">
-        اختر أقساماً رئيسية كاملة و/أو أقساماً فرعية محددة، ثم طبّق نسبة/مبلغ ربح موحّداً على جميع منتجاتها المرتبطة بمزوّد خارجي (store_type: API) دفعة واحدة — يُعاد حساب السعر النهائي لكل منتج فوراً.
-      </p>
-
-      <div className="bg-white border border-gray-200 rounded-xl p-3 space-y-3">
-        <div className="grid grid-cols-2 gap-3">
-          <div className="space-y-1">
-            <label className="text-[10px] font-bold text-gray-400">نوع الربح</label>
-            <div className="flex bg-gray-50 border border-gray-200 rounded-lg p-1">
-              <button onClick={() => setMarkupType("percent")} className={`flex-1 py-1.5 rounded-md text-xs font-black ${markupType === "percent" ? "bg-[var(--brand)] text-white" : "text-gray-500"}`}>نسبة %</button>
-              <button onClick={() => setMarkupType("fixed")} className={`flex-1 py-1.5 rounded-md text-xs font-black ${markupType === "fixed" ? "bg-[var(--brand)] text-white" : "text-gray-500"}`}>مبلغ ثابت</button>
-            </div>
-          </div>
-          <div className="space-y-1">
-            <label className="text-[10px] font-bold text-gray-400">القيمة {markupType === "percent" ? "(%)" : "($)"}</label>
-            <input type="number" step="0.5" value={markupValue} onChange={e => setMarkupValue(e.target.value)}
-              className="w-full p-3 bg-gray-50 border border-gray-200 rounded-lg text-sm font-black outline-none text-center" />
-          </div>
+      <div className="bg-white border border-gray-100 rounded-lg p-3 space-y-3">
+        <p className="text-xs font-bold text-gray-600">2) العملية</p>
+        <div className="grid grid-cols-3 gap-2">
+          {([["increase", "رفع الربح"], ["decrease", "خفض الربح"], ["set", "ضبط الربح"]] as const).map(([k, l]) => (
+            <button key={k} onClick={() => { setOp(k); invalidate(); }} className={`p-2.5 rounded-lg border text-[11px] font-bold ${op === k ? "bg-blue-50 border-[var(--brand)] text-[var(--brand)]" : "bg-gray-50 border-gray-100 text-gray-500"}`}>{l}</button>
+          ))}
         </div>
+        <div className="grid grid-cols-2 gap-2">
+          {([["percent", "نسبة مئوية %"], ["fixed", "مبلغ ثابت $"]] as const).map(([k, l]) => (
+            <button key={k} onClick={() => { setMarkupType(k); invalidate(); }} className={`p-2.5 rounded-lg border text-[11px] font-bold ${markupType === k ? "bg-blue-50 border-[var(--brand)] text-[var(--brand)]" : "bg-gray-50 border-gray-100 text-gray-500"}`}>{l}</button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2">
+          <input type="number" min={0} step="0.1" value={value} onChange={e => { setValue(e.target.value); invalidate(); }} placeholder={op === "set" ? "قيمة الربح الجديدة" : "مقدار التغيير"}
+            className="flex-1 p-3 bg-gray-50 border border-gray-200 rounded-lg text-sm font-black text-center outline-none" />
+          <span className="font-bold text-gray-400">{unit}</span>
+        </div>
+        <p className="text-[10px] text-gray-400 leading-relaxed">الربح يُحسب فوق سعر المزوّد (التكلفة). الرفع/الخفض يُحسب من الربح الحالي لكل منتج على حدة، ولا ينزل الربح عن صفر.</p>
+        <button onClick={runPreview} disabled={busy} className="w-full flex items-center justify-center gap-1.5 py-3 rounded-lg bg-gray-800 text-white text-sm font-bold disabled:opacity-40"><Eye size={15} /> معاينة قبل التطبيق</button>
+      </div>
 
-        <div className="space-y-1.5">
-          <label className="text-[10px] font-bold text-gray-400">الأقسام المستهدفة</label>
-          <div className="bg-gray-50 border border-gray-200 rounded-lg max-h-56 overflow-y-auto divide-y divide-gray-100">
-            {categories.length === 0 && <p className="text-[11px] text-gray-400 p-3 text-center">جاري تحميل الأقسام...</p>}
-            {categories.map((cat: any) => {
-              const subs = subsByCategory[String(cat.id)] || [];
-              const catSelected = isSelected("category", cat.id);
-              const isOpen = !!expanded[cat.id];
-              return (
-                <div key={cat.id}>
-                  <div className="flex items-center gap-2 p-2">
-                    <input type="checkbox" checked={catSelected} onChange={() => toggleCategory(cat.id)} className="w-4 h-4 accent-[var(--brand)]" />
-                    <LayoutGrid size={12} className="text-gray-400 shrink-0" />
-                    <span className="text-xs font-bold text-gray-700 flex-1 truncate">{cat.name}</span>
-                    {subs.length > 0 && (
-                      <button type="button" onClick={() => setExpanded(e => ({ ...e, [cat.id]: !e[cat.id] }))} className="p-1 text-gray-400">
-                        <ChevronDown size={14} className={`transition-transform ${isOpen ? "rotate-180" : ""}`} />
-                      </button>
-                    )}
-                  </div>
-                  {isOpen && subs.length > 0 && (
-                    <div className="pr-8 pb-1.5 space-y-1">
-                      {subs.map((sub: any) => (
-                        <label key={sub.id} className="flex items-center gap-2 text-[11px] text-gray-600">
-                          <input type="checkbox" disabled={catSelected} checked={catSelected || isSelected("subcategory", sub.id)}
-                            onChange={() => toggleSubcategory(sub.id, cat.id)} className="w-3.5 h-3.5 accent-[var(--brand)]" />
-                          <span className={catSelected ? "opacity-50" : ""}>{sub.name}</span>
-                        </label>
-                      ))}
-                    </div>
-                  )}
+      {preview && (
+        <div className="bg-white border border-teal-200 rounded-lg p-3 space-y-3">
+          <p className="text-xs font-black text-teal-700">نتيجة المعاينة</p>
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <div className="bg-teal-50 rounded-lg p-2"><p className="text-lg font-black text-teal-700">{preview.affected}</p><p className="text-[10px] text-gray-500">ستتأثر</p></div>
+            <div className="bg-gray-50 rounded-lg p-2"><p className="text-lg font-black text-gray-600">{preview.skipped}</p><p className="text-[10px] text-gray-500">تُتخطّى (بلا مزوّد)</p></div>
+            <div className="bg-gray-50 rounded-lg p-2"><p className="text-lg font-black text-gray-600">{preview.total_in_scope}</p><p className="text-[10px] text-gray-500">إجمالي النطاق</p></div>
+          </div>
+          {preview.samples.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-[10px] font-bold text-gray-400">أمثلة (السعر قبل ← بعد)</p>
+              {preview.samples.map(s => (
+                <div key={s.id} className="flex items-center justify-between gap-2 text-[11px] bg-gray-50 rounded-md px-2 py-1.5">
+                  <span className="truncate text-gray-600">{s.name}</span>
+                  <span className="whitespace-nowrap font-bold" dir="ltr">{fmt(s.old_price)} → <span className={s.new_price >= s.old_price ? "text-green-600" : "text-red-500"}>{fmt(s.new_price)}</span></span>
                 </div>
-              );
-            })}
-          </div>
-          <p className="text-[10px] text-gray-400">{scope.length === 0 ? "لم يُحدَّد أي قسم." : `تم اختيار ${scope.length} قسم/قسم فرعي.`}</p>
+              ))}
+            </div>
+          )}
+          <button onClick={apply} disabled={busy || preview.affected === 0} className="w-full flex items-center justify-center gap-1.5 py-3 rounded-lg bg-[var(--brand)] text-white text-sm font-bold disabled:opacity-40">
+            <Check size={15} /> {busy ? "جارِ التطبيق..." : `تأكيد وتطبيق على ${preview.affected} منتج`}
+          </button>
         </div>
-
-        <div className="bg-gray-50 border border-gray-200 rounded-lg p-2.5 flex items-center gap-2">
-          <span className="text-[10px] font-bold text-gray-400 whitespace-nowrap">معاينة: سعر تجريبي (التكلفة) $</span>
-          <input type="number" min={0} value={previewBase} onChange={e => setPreviewBase(e.target.value)} className="w-20 p-1.5 bg-white border border-gray-200 rounded-md text-xs font-black text-center outline-none" />
-          <span className="text-gray-300">⇐</span>
-          <span className="text-sm font-black text-[var(--brand)]">{previewResult.toFixed(2)}$</span>
-          <span className="text-[10px] text-gray-400">السعر النهائي بعد الربح</span>
-        </div>
-
-        <button onClick={apply} disabled={saving} className="w-full bg-[var(--brand)] text-white py-3 rounded-xl font-black text-sm flex items-center justify-center gap-1.5 disabled:opacity-60 active:scale-[0.98]">
-          <Save size={15} /> {saving ? "جاري التطبيق..." : "تطبيق على الأقسام المختارة"}
-        </button>
-      </div>
+      )}
     </div>
   );
 }

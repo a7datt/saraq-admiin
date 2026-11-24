@@ -1,3 +1,4 @@
+import DiscountRulesEditor from "../components/DiscountRulesEditor";
 import React, { useEffect, useState, useMemo } from "react";
 import { ChevronRight, Plus, Save, Trash2, X, Award, Users, RefreshCw, Percent, Eye, EyeOff, ArrowUp, ArrowDown, LayoutGrid, ListChecks, ChevronDown } from "lucide-react";
 import AdminImageUpload from "../components/AdminImageUpload";
@@ -121,7 +122,7 @@ export default function AdminRanksPage({ adminFetch, onBack }: Props) {
         name: editing.name, image_url: editing.image_url, color: editing.color,
         required_amount: Number(editing.required_amount) || 0,
         has_discount: !!editing.has_discount,
-        discount_percent: editing.has_discount ? Number(editing.discount_percent) || 0 : 0,
+        ...(editing.id ? {} : { discount_percent: 0 }), // [PHASE-2] النسب صارت قواعد (تُزامَن تلقائياً)
         description: editing.description || "", benefits: editing.benefits || "",
         is_active: editing.is_active !== false, sort_order: Number(editing.sort_order) || 0,
       };
@@ -131,13 +132,6 @@ export default function AdminRanksPage({ adminFetch, onBack }: Props) {
       });
       const data = await res.json();
       if (!res.ok) { showToast(data?.error || "فشل الحفظ", "error"); setSaving(false); return; }
-      const rankId = editing.id || data.id;
-      if (rankId) {
-        await adminFetch(`/api/admin/ranks/${rankId}/categories`, {
-          method: "PUT",
-          body: JSON.stringify({ items: payload.has_discount ? scope : [] }),
-        }).catch(() => {});
-      }
       showToast(editing.id ? "تم تحديث الرتبة — ستظهر فوراً للمستخدمين" : "تمت إضافة الرتبة", "success");
       setEditing(null);
       load();
@@ -281,61 +275,17 @@ export default function AdminRanksPage({ adminFetch, onBack }: Props) {
                   </span>
                 </label>
                 {editing.has_discount && (
-                  <div className="space-y-3">
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-gray-400">نسبة الخصم (%) على المشتريات</label>
-                      <input type="number" min={0} max={99} step="0.5" value={editing.discount_percent ?? 0} onChange={e => setEditing({ ...editing, discount_percent: e.target.value })}
-                        className="w-full p-3 bg-white border border-gray-200 rounded-lg text-sm font-black outline-none text-center" />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-gray-400 flex items-center gap-1"><ListChecks size={12} /> الأقسام التي يُطبَّق عليها الخصم (الأقسام غير المختارة لا تُشمل بالخصم أبداً)</label>
-                      <div className="bg-white border border-gray-200 rounded-lg max-h-56 overflow-y-auto divide-y divide-gray-100">
-                        {categories.length === 0 && <p className="text-[11px] text-gray-400 p-3 text-center">جاري تحميل الأقسام...</p>}
-                        {categories.map((cat: any) => {
-                          const subs = subsByCategory[String(cat.id)] || [];
-                          const catSelected = isSelected("category", cat.id);
-                          const isOpen = !!expanded[cat.id];
-                          return (
-                            <div key={cat.id}>
-                              <div className="flex items-center gap-2 p-2">
-                                <input type="checkbox" checked={catSelected} onChange={() => toggleCategory(cat.id)} className="w-4 h-4 accent-[var(--brand)]" />
-                                <LayoutGrid size={12} className="text-gray-400 shrink-0" />
-                                <span className="text-xs font-bold text-gray-700 flex-1 truncate">{cat.name}</span>
-                                {subs.length > 0 && (
-                                  <button type="button" onClick={() => setExpanded(e => ({ ...e, [cat.id]: !e[cat.id] }))} className="p-1 text-gray-400">
-                                    <ChevronDown size={14} className={`transition-transform ${isOpen ? "rotate-180" : ""}`} />
-                                  </button>
-                                )}
-                              </div>
-                              {isOpen && subs.length > 0 && (
-                                <div className="pr-8 pb-1.5 space-y-1">
-                                  {subs.map((sub: any) => (
-                                    <label key={sub.id} className="flex items-center gap-2 text-[11px] text-gray-600">
-                                      <input type="checkbox" disabled={catSelected} checked={catSelected || isSelected("subcategory", sub.id)}
-                                        onChange={() => toggleSubcategory(sub.id, cat.id)} className="w-3.5 h-3.5 accent-[var(--brand)]" />
-                                      <span className={catSelected ? "opacity-50" : ""}>{sub.name}</span>
-                                    </label>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                      <p className="text-[10px] text-gray-400">{scope.length === 0 ? "لم يُحدَّد أي قسم — لن يُطبَّق الخصم على أي منتج حالياً." : `مُطبَّق على ${scope.length} قسم/قسم فرعي محدد.`}</p>
-                    </div>
-
-                    <div className="bg-white border border-gray-200 rounded-lg p-2.5 flex items-center gap-2">
-                      <span className="text-[10px] font-bold text-gray-400 whitespace-nowrap">معاينة: سعر تجريبي $</span>
-                      <input type="number" min={0} value={previewPrice} onChange={e => setPreviewPrice(e.target.value)} className="w-20 p-1.5 bg-gray-50 border border-gray-200 rounded-md text-xs font-black text-center outline-none" />
-                      <span className="text-gray-300">⇐</span>
-                      <span className="text-sm font-black text-[var(--brand)]">
-                        {(Number(previewPrice || 0) * (1 - (Number(editing.discount_percent) || 0) / 100)).toFixed(2)}$
-                      </span>
-                      <span className="text-[10px] text-gray-400">بعد خصم {fmt(editing.discount_percent)}%</span>
-                    </div>
-                  </div>
+                  editing.id ? (
+                    <DiscountRulesEditor
+                      adminFetch={adminFetch}
+                      ownerType="rank"
+                      ownerId={Number(editing.id)}
+                      hint="قواعد الخصم لهذه الرتبة: لكل قسم أو قسم فرعي أو فرع فرعي أو منتج نسبة مستقلة. بلا قواعد = لا خصم."
+                      onSaved={load}
+                    />
+                  ) : (
+                    <p className="text-[11px] text-gray-500 bg-white border border-dashed border-gray-200 rounded-lg p-3 text-center">احفظ الرتبة أولاً، ثم افتحها للتعديل لإضافة قواعد الخصم.</p>
+                  )
                 )}
               </div>
 
