@@ -260,3 +260,36 @@ SELECT 'api_global', NULL, 'all', NULL, v
 FROM (SELECT NULLIF((SELECT value FROM public.settings WHERE key='public_api_discount_percent' LIMIT 1),'')::numeric AS v) t
 WHERE v > 0 AND v < 100
 ON CONFLICT DO NOTHING;
+
+-- ==========================================================================
+-- [PHASE-3] 2026-11-24 — توثيق الهوية (identity_verifications) + ربطه بطرق الدفع
+-- ==========================================================================
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS identity_verified boolean NOT NULL DEFAULT false;
+ALTER TABLE public.payment_methods ADD COLUMN IF NOT EXISTS requires_identity boolean NOT NULL DEFAULT false;
+
+CREATE TABLE IF NOT EXISTS public.identity_verifications (
+  id bigserial PRIMARY KEY,
+  user_id bigint NOT NULL,
+  status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
+  front_path text NOT NULL,
+  back_path text NOT NULL,
+  reject_reason text,
+  reviewed_by text,
+  reviewed_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS identity_verifications_user_idx ON public.identity_verifications (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS identity_verifications_status_idx ON public.identity_verifications (status, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS identity_verifications_one_pending_idx ON public.identity_verifications (user_id) WHERE status = 'pending';
+ALTER TABLE public.identity_verifications ENABLE ROW LEVEL SECURITY;
+
+-- مخزن خاص (غير عام) لصور الهويات
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES ('identity-docs', 'identity-docs', false, 6291456, ARRAY['image/jpeg','image/png','image/webp'])
+ON CONFLICT (id) DO UPDATE SET public = false, file_size_limit = 6291456, allowed_mime_types = ARRAY['image/jpeg','image/png','image/webp'];
+
+INSERT INTO public.settings (key, value) VALUES
+  ('identity_verification_enabled', 'false'),
+  ('identity_verification_description', 'ارفع صورة واضحة للهوية من الأمام ومن الخلف. يجب أن تكون جميع البيانات مقروءة وغير مقصوصة.')
+ON CONFLICT (key) DO NOTHING;

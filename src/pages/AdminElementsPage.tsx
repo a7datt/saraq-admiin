@@ -2241,6 +2241,11 @@ const AdminElementsPage = React.forwardRef<AdminElementsPageHandle, any>(({categ
                     {editingItem.qr_mode==="image" && !editingItem.qr_image_url && <p className="text-[11px] text-amber-600">ارفع صورة الـ QR، وإلا سيُستخدم التوليد التلقائي.</p>}
                   </div>
                 )}
+                {/* [PHASE-3] يتطلب توثيق الهوية */}
+                <label className="flex items-center justify-between gap-3 bg-gray-50 rounded-lg p-3 cursor-pointer">
+                  <span className="text-xs font-bold text-gray-700">يتطلب توثيق الهوية</span>
+                  <input type="checkbox" className="w-5 h-5 accent-[var(--brand)]" checked={!!editingItem.requires_identity} onChange={e => setEditingItem({...editingItem,requires_identity:e.target.checked})} />
+                </label>
                 <textarea placeholder="وصف طريقة الدفع (اختياري)" className="w-full p-3 bg-gray-50 rounded-xl text-sm outline-none h-16 resize-none focus:ring-2 focus:ring-blue-100" value={editingItem.description||""} onChange={e => setEditingItem({...editingItem,description:e.target.value})}/>
                 {(editingItem.method_type==="syriatel"||editingItem.method_type==="shamcash"||editingItem.method_type==="binance"||editingItem.method_type==="crypto_usdt_trc20"||editingItem.method_type==="crypto_usdt_bep20") && <input type="text" placeholder={editingItem.method_type==="syriatel"?"رقم GSM أو كود الكاش (8 أرقام)":editingItem.method_type==="binance"?"Binance ID الخاص بحساب المتجر (المستلم)":editingItem.method_type==="crypto_usdt_trc20"?"عنوان محفظة Tron (TRC20)":editingItem.method_type==="crypto_usdt_bep20"?"عنوان محفظة BSC (BEP20 — 0x...)":"عنوان المحفظة (32 hex) أو رقم الحساب"} className="w-full p-3 bg-gray-50 rounded-xl text-sm outline-none font-mono focus:ring-2 focus:ring-blue-100" value={editingItem.api_account||""} onChange={e => setEditingItem({...editingItem,api_account:e.target.value})}/>}
                 {(editingItem.method_type==="manual"||editingItem.method_type==="syriatel"||editingItem.method_type==="shamcash"||editingItem.method_type==="binance"||editingItem.method_type==="crypto_usdt_trc20"||editingItem.method_type==="crypto_usdt_bep20") && (

@@ -75,6 +75,7 @@ import CurrenciesAdminPage from "./CurrenciesAdminPage";
 import AdminHomePage from "./AdminHomePage";
 import AdminRanksPage from "./AdminRanksPage";
 import AdminBulkMarginPage from "./AdminBulkMarginPage";
+import AdminIdentityPage from "./AdminIdentityPage";
 import AdminStatsPage from "./AdminStatsPage";
 import SessionsActivityAdminPage from "./SessionsActivityAdminPage";
 import DevManagementPage from "./DevManagementPage";
@@ -2323,7 +2324,7 @@ export default function AdminPage({
       } catch {}
     };
     const [customFields, setCustomFields] = useState<Array<{id: string; key?: string; label: string; required: boolean; isDefault?: boolean}>>([]);
-    const [newPaymentMethod, setNewPaymentMethod] = useState({ name: "", image_url: "", wallet_address: "", qr_enabled: false, qr_mode: "auto", qr_image_url: "", min_amount: "", instructions: "", description: "", method_type: "manual", api_account: "", payment_currency: "USD", currency_id: "" as string | number, bonus_type: "" as "" | "commission" | "bonus", bonus_percent: "" });
+    const [newPaymentMethod, setNewPaymentMethod] = useState({ name: "", image_url: "", wallet_address: "", qr_enabled: false, qr_mode: "auto", qr_image_url: "", requires_identity: false, min_amount: "", instructions: "", description: "", method_type: "manual", api_account: "", payment_currency: "USD", currency_id: "" as string | number, bonus_type: "" as "" | "commission" | "bonus", bonus_percent: "" });
     const [availableCurrencies, setAvailableCurrencies] = useState<Array<{ id: number; name: string; symbol: string; exchange_rate: number; is_default?: boolean }>>([]);
     // سيرياتيل كاش يقبل فقط عملة الليرة السورية (ل.س / SYP) لأن الـ API يرد بها حصراً
     const isSypCurrency = (c: { name?: string; symbol?: string }) => {
@@ -3049,7 +3050,7 @@ export default function AdminPage({
         body: JSON.stringify(payload)
       });
       if (res.ok) {
-        setNewPaymentMethod({ name: "", image_url: "", wallet_address: "", qr_enabled: false, qr_mode: "auto", qr_image_url: "", min_amount: "", instructions: "", description: "", method_type: "manual", api_account: "", payment_currency: "USD", currency_id: "", bonus_type: "", bonus_percent: "" });
+        setNewPaymentMethod({ name: "", image_url: "", wallet_address: "", qr_enabled: false, qr_mode: "auto", qr_image_url: "", requires_identity: false, min_amount: "", instructions: "", description: "", method_type: "manual", api_account: "", payment_currency: "USD", currency_id: "", bonus_type: "", bonus_percent: "" });
         setPaymentMethodFields(ensurePaymentMethodDefaultFields([]));
         fetchPaymentMethods();
         showToast("تمت إضافة طريقة الدفع", 'info');
@@ -3343,6 +3344,7 @@ export default function AdminPage({
                         { label: "انشاء قسيمة", icon: <Ticket size={17}/>, action: () => { setActiveSubMenu("add_voucher"); } },
                         { label: "تحديد الرتب", icon: <Award size={17}/>, action: () => { setAdminTab("ranks"); } },
                         { label: "تعديل نسبة الربح", icon: <Percent size={17}/>, action: () => { setAdminTab("bulk_margin"); } },
+                        { label: "توثيقات الهوية", icon: <ShieldCheck size={17}/>, action: () => { setAdminTab("identity"); } },
                       ].map((item, i) => (
                         <button
                           key={i}
@@ -3489,6 +3491,7 @@ export default function AdminPage({
 
           {adminTab === "currencies" && <CurrenciesAdminPage adminFetch={adminFetch} onBack={() => setAdminTab("admin_home")} />}
           {adminTab === "ranks" && <AdminRanksPage adminFetch={adminFetch} onBack={() => setAdminTab("admin_home")} />}
+          {adminTab === "identity" && <AdminIdentityPage adminFetch={adminFetch} onBack={() => setAdminTab("admin_home")} />}
           {adminTab === "bulk_margin" && <AdminBulkMarginPage adminFetch={adminFetch} onBack={() => setAdminTab("admin_home")} />}
 
           {/* ===== AHMINIX ===== */}
@@ -3757,8 +3760,9 @@ export default function AdminPage({
                   { key:"payment_gateways", label:"طرق الدفع الآلية", icon:<Wallet size={18}/>, color:"text-indigo-600 bg-indigo-50" },
                   { key:"ranks", label:"تحديد الرتب", icon:<Award size={18}/>, color:"text-rose-600 bg-rose-50" },
                   { key:"bulk_margin", label:"تعديل نسبة الربح", icon:<Percent size={18}/>, color:"text-teal-600 bg-teal-50" },
+                  { key:"identity", label:"توثيقات الهوية", icon:<ShieldCheck size={18}/>, color:"text-sky-600 bg-sky-50" },
                 ].map(item => (
-                  <button key={item.key} onClick={() => { if(item.key==="payment_gateways"){setAdminTab("payment_gateways");setActiveSubMenu(null);}else if(item.key==="ranks"||item.key==="bulk_margin"){setAdminTab(item.key);setActiveSubMenu(null);}else if(item.key==="add_paymentMethod"){setAdminTab("add_paymentMethod");setActiveSubMenu("add_paymentMethod");}else setActiveSubMenu(item.key); }}
+                  <button key={item.key} onClick={() => { if(item.key==="payment_gateways"){setAdminTab("payment_gateways");setActiveSubMenu(null);}else if(item.key==="ranks"||item.key==="bulk_margin"||item.key==="identity"){setAdminTab(item.key);setActiveSubMenu(null);}else if(item.key==="add_paymentMethod"){setAdminTab("add_paymentMethod");setActiveSubMenu("add_paymentMethod");}else setActiveSubMenu(item.key); }}
                     className="flex flex-col items-center gap-1.5 p-2 rounded-lg hover:bg-gray-50 active:scale-95 transition-all">
                     <div className={`w-11 h-11 rounded-lg flex items-center justify-center ${item.color}`}>{item.icon}</div>
                     <span className="text-[9px] font-bold text-gray-600 text-center leading-tight">{item.label}</span>
@@ -4077,6 +4081,11 @@ export default function AdminPage({
                         {newPaymentMethod.qr_mode==="image" && !newPaymentMethod.qr_image_url && <p className="text-[11px] text-amber-600">ارفع صورة الـ QR، وإلا سيُستخدم التوليد التلقائي.</p>}
                       </div>
                     )}
+                    {/* [PHASE-3] يتطلب توثيق الهوية */}
+                    <label className="flex items-center justify-between gap-3 bg-gray-50 rounded-lg p-3 cursor-pointer">
+                      <span className="text-xs font-bold text-gray-700">يتطلب توثيق الهوية</span>
+                      <input type="checkbox" className="w-5 h-5 accent-[var(--brand)]" checked={!!newPaymentMethod.requires_identity} onChange={e => setNewPaymentMethod({...newPaymentMethod,requires_identity:e.target.checked})} />
+                    </label>
                     <textarea placeholder="وصف طريقة الدفع (اختياري - يظهر للمستخدم)" className="w-full p-3 bg-gray-50 rounded-lg text-sm outline-none h-16 resize-none" value={newPaymentMethod.description} onChange={e => setNewPaymentMethod({...newPaymentMethod,description:e.target.value})}/>
                     {(newPaymentMethod.method_type==="syriatel"||newPaymentMethod.method_type==="shamcash"||newPaymentMethod.method_type==="binance"||newPaymentMethod.method_type==="crypto_usdt_trc20"||newPaymentMethod.method_type==="crypto_usdt_bep20") && <input type="text" placeholder={newPaymentMethod.method_type==="syriatel"?"رقم GSM أو كود الكاش (8 أرقام)":newPaymentMethod.method_type==="binance"?"Binance ID الخاص بحساب المتجر (المستلم)":(newPaymentMethod.method_type==="crypto_usdt_trc20"||newPaymentMethod.method_type==="crypto_usdt_bep20")?"عنوان محفظة USDT (TRC20/BEP20)":"عنوان المحفظة (32 hex) أو رقم الحساب"} className="w-full p-3 bg-gray-50 rounded-lg text-sm outline-none font-mono" value={newPaymentMethod.api_account} onChange={e => setNewPaymentMethod({...newPaymentMethod,api_account:e.target.value})}/>}
                     {(newPaymentMethod.method_type==="manual"||newPaymentMethod.method_type==="syriatel"||newPaymentMethod.method_type==="shamcash"||newPaymentMethod.method_type==="binance"||newPaymentMethod.method_type==="crypto_usdt_trc20"||newPaymentMethod.method_type==="crypto_usdt_bep20") && (

@@ -1,3 +1,4 @@
+import VerifiedBadge from "../components/VerifiedBadge";
 import React from "react";
 import { Search, Zap, CheckCircle, XCircle, ChevronDown, User, ShoppingBag, AlertTriangle, RefreshCw, CalendarDays, X, History, DollarSign, Clock, ArrowUpRight, Store, Layers, Copy, Check, Share2, Image as ImageIcon, FileText, Table, ArrowUpDown, UserSearch, Star, ShieldAlert, ExternalLink, ListChecks, MessageSquare, CheckSquare, Square } from "lucide-react";
 import { showToast } from "../components/ToastContainer";
@@ -896,7 +897,7 @@ const AdminOrdersAdminPage = ({adminOrders, orderSearch, setOrderSearch, orderDa
                       </div>
                     )}
                     <div className="min-w-0 flex-1">
-                      <p className="text-xs font-bold text-gray-800 truncate">{order.user_name || "مستخدم محذوف"}</p>
+                      <p className="text-xs font-bold text-gray-800 truncate">{order.user_name || "مستخدم محذوف"}{order.user_identity_verified && <VerifiedBadge />}</p>
                       <p className="text-[10px] text-gray-500">رقم الدخول: <span className="font-mono font-bold text-gray-700">#{order.user_db_id ?? order.user_id}</span></p>
                       {order.user_phone && order.user_phone !== "—" && (
                         <p className="text-[10px] text-gray-400 truncate">{order.user_phone}</p>
@@ -1045,7 +1046,7 @@ const AdminOrdersAdminPage = ({adminOrders, orderSearch, setOrderSearch, orderDa
                       : <User size={16} className="text-gray-400" />}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <p className="font-bold text-sm text-gray-800 truncate">{order.user_name}</p>
+                    <p className="font-bold text-sm text-gray-800 truncate">{order.user_name}{order.user_identity_verified && <VerifiedBadge />}</p>
                     <p className="text-[10px] text-gray-400 truncate">{order.user_email || order.users?.email || "—"}</p>
                     <div className="mt-1"><UserTrustBadges order={order} onOpenProfile={() => openUserProfile(order.user_db_id ?? order.user_id)} /></div>
                   </div>

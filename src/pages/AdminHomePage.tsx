@@ -1,5 +1,5 @@
 import React from "react";
-import { ShoppingBag, Wallet, Users, X, Clock, TrendingUp, ChevronLeft, AlertTriangle } from "lucide-react";
+import { ShoppingBag, Wallet, Users, X, Clock, TrendingUp, ChevronLeft, AlertTriangle, ShieldCheck } from "lucide-react";
 
 const AdminHomePage = ({adminUsers, adminOrders, adminTransactions, setAdminTab, fetchUser, fetchAdminUsers, handleToggleVip, handleBlockUser, handleDeleteUser, handleSendNotification, onOpenChatWithUser, adminFetch, setFocusTarget}: any) => {
   const [userOrdersModal, setUserOrdersModal] = React.useState<any>(null);
@@ -8,6 +8,10 @@ const AdminHomePage = ({adminUsers, adminOrders, adminTransactions, setAdminTab,
   const [userTxList, setUserTxList] = React.useState<any[]>([]);
   const [modalLoading, setModalLoading] = React.useState(false);
   const [providers, setProviders] = React.useState<any[]>([]);
+  const [identityPending, setIdentityPending] = React.useState(0);
+  React.useEffect(() => {
+    adminFetch("/api/admin/identity/pending-count").then((r: Response) => r.ok ? r.json() : { count: 0 }).then((d: any) => setIdentityPending(Number(d?.count) || 0)).catch(() => {});
+  }, []);
 
   React.useEffect(() => {
     adminFetch("/api/admin/providers")
@@ -44,6 +48,14 @@ const AdminHomePage = ({adminUsers, adminOrders, adminTransactions, setAdminTab,
 
   return (
     <div className="space-y-4" dir="rtl">
+      {/* [PHASE-3] توثيقات الهوية + عدد الطلبات المعلقة */}
+      <button onClick={() => setAdminTab("identity")} className="w-full flex items-center gap-3 bg-white border border-sky-100 rounded-md p-3 active:scale-[0.98] transition-transform">
+        <ShieldCheck size={22} className="text-sky-500" />
+        <span className="text-[12px] font-bold text-gray-700 flex-1 text-right">توثيقات الهوية</span>
+        {identityPending > 0 && <span className="min-w-[22px] h-[22px] px-1.5 rounded-full bg-red-500 text-white text-[11px] font-black flex items-center justify-center">{identityPending}</span>}
+        <ChevronLeft size={16} className="text-gray-300" />
+      </button>
+
       {/* Top Cards */}
       <div className="grid grid-cols-3 gap-2.5">
         <button onClick={() => setAdminTab("orders")}

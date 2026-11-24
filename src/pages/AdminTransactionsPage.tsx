@@ -1,3 +1,4 @@
+import VerifiedBadge from "../components/VerifiedBadge";
 import React from "react";
 import OptimizedImage from "../components/OptimizedImage";
 import { Search, ChevronDown, User, Wallet, CheckCircle, XCircle, AlertTriangle, Clock, DollarSign, X, CalendarDays, History, Share2, Image as ImageIcon, FileText, Table } from "lucide-react";
@@ -93,7 +94,7 @@ const ShamCashInvoiceRow: React.FC<{
     <div className="p-3">
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0 flex-1">
-          <p className="text-xs font-bold text-gray-700 truncate">{inv.user_name} <span className="text-gray-400 font-normal">#{inv.user_db_id}</span></p>
+          <p className="text-xs font-bold text-gray-700 truncate">{inv.user_name}{inv.user_identity_verified && <VerifiedBadge />} <span className="text-gray-400 font-normal">#{inv.user_db_id}</span></p>
           <p className="text-[10px] text-gray-400 truncate">فاتورة {inv.invoice_number} · {inv.payment_method_name} <span className="text-gray-300">·</span> {INVOICE_GATEWAY_LABEL[inv.gateway_code] || inv.gateway_code}</p>
           <p className="text-[10px] text-gray-400">{new Date(inv.created_at).toLocaleString("ar-EG")}</p>
         </div>
@@ -405,7 +406,7 @@ const AdminTransactionsPage = ({adminTransactions, transSearch, setTransSearch, 
                 : <User size={18} className="text-gray-400"/>}
             </div>
             <div className="min-w-0 flex-1">
-              <p className="font-bold text-sm text-gray-800 truncate">{t.user_name || "—"}</p>
+              <p className="font-bold text-sm text-gray-800 truncate">{t.user_name || "—"}{t.user_identity_verified && <VerifiedBadge />}</p>
               <p className="text-[10px] text-gray-400 truncate">{t.user_email || "—"}</p>
               <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                 <span className="text-[10px] text-gray-400">#{t.user_db_id || t.user_id}</span>
@@ -595,7 +596,7 @@ const AdminTransactionsPage = ({adminTransactions, transSearch, setTransSearch, 
             {list.filter(t => t.status === 'approved').map(t => (
               <div key={t.id} className="flex items-center justify-between bg-gray-50 border border-gray-100 rounded-lg px-3 py-2.5">
                 <div className="min-w-0">
-                  <p className="text-xs font-bold text-gray-700 truncate">{t.user_name || "—"}</p>
+                  <p className="text-xs font-bold text-gray-700 truncate">{t.user_name || "—"}{t.user_identity_verified && <VerifiedBadge />}</p>
                   <p className="text-[10px] text-gray-400">TX{t.id}{t.tx_number ? ` · ${t.tx_number}` : ""} · {new Date(t.created_at).toLocaleDateString("ar-EG")}</p>
                 </div>
                 <p className="text-sm font-black text-green-600 shrink-0">{Number(t.amount || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })} $</p>

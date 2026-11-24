@@ -3905,6 +3905,10 @@ async function startServer() {
   // بخطأ 401 حتى لو كان توكن الأدمن صالحاً تماماً (يظهر للمستخدم كـ"انتهت صلاحية جلسة الأدمن").
   // الحل: استدعاء adminAuth صراحةً هنا قبل permGuard لضمان تعيين adminPayload/subAdminPermissions أولاً.
   app.use("/api/admin/products-all", adminAuth, permGuard("store"));
+  // [PHASE-2/3] صلاحيات مسارات القواعد والتوثيق (تُسجَّل هنا كي تُنفَّذ قبل المسارات نفسها)
+  app.use(["/api/admin/discount-rules", "/api/admin/discount-scope-tree", "/api/admin/discount-scope-search"], adminAuth, permGuard("rewards"));
+  app.use("/api/admin/products/bulk-profit", adminAuth, permGuard("store"));
+  app.use("/api/admin/identity", adminAuth, permGuard("users"));
   app.use(["/api/admin/api-tokens", "/api/admin/users/:id/api-token", "/api/admin/public-api-settings"], adminAuth, permGuard("settings_api"));
   // [SECURITY FIX -- تقرير الفحص الأمني، الجولة 4، القسم 1] نفس نمط الخلل تماماً: مسارات
   // /api/admin/providers/*، /api/admin/ahminix/*، و/api/admin/payment-gateways/* كانت جميعها
@@ -8382,6 +8386,17 @@ async function startServer() {
   // GET /api/transactions/shamcash-invoice/pending — يتحقق إن كان للمستخدم الحالي فاتورة شام كاش
   // معلّقة سارية الصلاحية بعد، ليتمكن من العودة إليها (مثلاً بعد تحديث الصفحة أو إعادة فتح
   // المحفظة) بدل أن يضطر لبدء فاتورة جديدة أو يخسر الفاتورة التي أنشأها فعلاً.
+  // [PHASE-3] بوابة توثيق الهوية لطرق الدفع التي تتطلبها (التحقق من السيرفر دائماً — لا يعتمد على الواجهة).
+  async function identityGate(userId: any, paymentMethodId: any): Promise<string | null> {
+    try {
+      const { data: m, error: mErr } = await supabase.from("payment_methods").select("requires_identity").eq("id", paymentMethodId).maybeSingle();
+      if (mErr) return "تعذر التحقق من متطلبات طريقة الدفع، حاول مجدداً.";
+      if (!m || !m.requires_identity) return null;
+      const { data: u } = await supabase.from("users").select("identity_verified").eq("id", userId).maybeSingle();
+      return u?.identity_verified ? null : "هذه الطريقة تتطلب توثيق الهوية. وثّق هويتك من صفحة حسابي أولاً.";
+    } catch { return "تعذر التحقق من حالة توثيق الهوية، حاول مجدداً."; }
+  }
+
   app.get("/api/transactions/shamcash-invoice/pending", authenticate, async (req, res) => {
     try {
       const userId = (req as any).userId;
@@ -8399,6 +8414,7 @@ async function startServer() {
       const { paymentMethodId, amount } = req.body;
       if (!paymentMethodId || !amount) return res.status(400).json({ error: "بيانات ناقصة" });
       if (!isValidId(paymentMethodId)) return res.status(400).json({ error: "طريقة دفع غير صحيحة" });
+      { const idBlock = await identityGate(userId, paymentMethodId); if (idBlock) return res.status(403).json({ error: idBlock, code: "IDENTITY_REQUIRED" }); }
 
       // [RESUME] إن كانت للمستخدم فاتورة معلّقة سارية بالفعل، نُعيدها كما هي بدل إنشاء فاتورة
       // وحجز "قيد التحقق" جديدين — يمنع تكدّس عدة حجوزات معلّقة لمستخدم واحد ويتيح له إكمال
@@ -8545,6 +8561,7 @@ async function startServer() {
       const { data: inv } = await supabase.from("shamcash_invoices")
         .select("*").eq("invoice_number", invoiceNumber).eq("user_id", userId).single();
       if (!inv) return res.status(404).json({ error: "الفاتورة غير موجودة" });
+      { const idBlock = await identityGate(userId, inv.payment_method_id); if (idBlock) return res.status(403).json({ error: idBlock, code: "IDENTITY_REQUIRED" }); }
       if (inv.status !== "pending") {
         const map: Record<string, string> = { paid: "هذه الفاتورة مدفوعة بالفعل.", expired: "انتهت صلاحية هذه الفاتورة.", cancelled: "تم إلغاء هذه الفاتورة." };
         return res.status(409).json({ error: map[inv.status] || "حالة الفاتورة لا تسمح بالتحقق" });
@@ -8648,6 +8665,7 @@ async function startServer() {
         return res.status(400).json({ error: "بيانات ناقصة" });
       }
       if (!isValidId(paymentMethodId)) return res.status(400).json({ error: "طريقة دفع غير صحيحة" });
+      { const idBlock = await identityGate(userId, paymentMethodId); if (idBlock) return res.status(403).json({ error: idBlock, code: "IDENTITY_REQUIRED" }); }
       // نسمح بمبلغ أكبر إذا كان بالليرة السورية (حتى 50 مليون)
       const maxAmount = (inputCurrency === "SYP" || String(inputCurrency).toUpperCase() === "SYP") ? 50000000 : 100000;
       if (!isValidAmount(amount, 0.01, maxAmount)) return res.status(400).json({ error: "المبلغ غير صحيح" });
@@ -8931,6 +8949,7 @@ async function startServer() {
       const { paymentMethodId, amount, originalAmount, originalCurrency, note, receiptImageUrl, customFieldsData } = req.body;
       // Validation
       if (!isValidId(paymentMethodId)) return res.status(400).json({ error: "طريقة دفع غير صحيحة" });
+      { const idBlock = await identityGate(userId, paymentMethodId); if (idBlock) return res.status(403).json({ error: idBlock, code: "IDENTITY_REQUIRED" }); }
       if (!isValidAmount(amount, 0.01, 100000)) return res.status(400).json({ error: "المبلغ يجب أن يكون رقماً موجباً" });
       if (note && typeof note === "string" && note.length > 300) return res.status(400).json({ error: "الملاحظة طويلة جداً (أقصاه 300 حرف)" });
       if (receiptImageUrl && !isValidUrl(receiptImageUrl)) return res.status(400).json({ error: "رابط الإيصال غير صحيح" });
@@ -10709,6 +10728,109 @@ ${userContext}
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // [PHASE-3] توثيق الهوية — إدارة الطلبات (الصور في مخزن خاص، تُبثّ عبر السيرفر للأدمن فقط)
+  // ═══════════════════════════════════════════════════════════════════════════
+  const IDENTITY_BUCKET = "identity-docs";
+
+  app.get("/api/admin/identity/settings", async (req, res) => {
+    try {
+      const { data } = await supabase.from("settings").select("key,value").in("key", ["identity_verification_enabled", "identity_verification_description"]);
+      const m: Record<string, string> = {};
+      (data || []).forEach((r: any) => { m[r.key] = r.value; });
+      res.json({ enabled: m.identity_verification_enabled === "true", description: m.identity_verification_description || "" });
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  app.put("/api/admin/identity/settings", async (req, res) => {
+    try {
+      const rows: { key: string; value: string }[] = [];
+      if (req.body?.enabled !== undefined) rows.push({ key: "identity_verification_enabled", value: req.body.enabled ? "true" : "false" });
+      if (req.body?.description !== undefined) {
+        if (typeof req.body.description !== "string") return res.status(400).json({ error: "الوصف غير صحيح" });
+        rows.push({ key: "identity_verification_description", value: req.body.description.slice(0, 3000) });
+      }
+      if (rows.length === 0) return res.status(400).json({ error: "لا توجد حقول للتعديل" });
+      const { error } = await supabase.from("settings").upsert(rows, { onConflict: "key" });
+      if (error) throw error;
+      logAdminActivity({ action_type: "identity_settings_updated", target_model: "settings", target_id: "identity", details: "تحديث إعدادات توثيق الهوية", req }).catch(() => {});
+      res.json({ success: true });
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  app.get("/api/admin/identity/pending-count", async (req, res) => {
+    try {
+      const { count, error } = await supabase.from("identity_verifications").select("id", { count: "exact", head: true }).eq("status", "pending");
+      if (error) throw error;
+      res.json({ count: count || 0 });
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  app.get("/api/admin/identity/requests", async (req, res) => {
+    try {
+      const status = String(req.query.status || "pending");
+      let q = supabase.from("identity_verifications").select("id, user_id, status, reject_reason, reviewed_by, reviewed_at, created_at").order("created_at", { ascending: false }).limit(100);
+      if (["pending", "approved", "rejected"].includes(status)) q = q.eq("status", status);
+      const { data, error } = await q;
+      if (error) throw error;
+      const rows = data || [];
+      const ids = [...new Set(rows.map((r: any) => r.user_id))];
+      const users: Record<string, any> = {};
+      if (ids.length) {
+        const { data: us } = await supabase.from("users").select("id, name, email, phone, identity_verified").in("id", ids);
+        (us || []).forEach((u: any) => { users[String(u.id)] = u; });
+      }
+      res.json(rows.map((r: any) => ({ ...r, user: users[String(r.user_id)] || null })));
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  app.get("/api/admin/identity/requests/:id/image/:side", async (req, res) => {
+    try {
+      if (!isValidId(req.params.id)) return res.status(400).json({ error: "معرف غير صحيح" });
+      const side = req.params.side;
+      if (side !== "front" && side !== "back") return res.status(400).json({ error: "جهة غير صحيحة" });
+      const { data: row } = await supabase.from("identity_verifications").select("front_path, back_path").eq("id", req.params.id).maybeSingle();
+      if (!row) return res.status(404).json({ error: "الطلب غير موجود" });
+      const { data: blob, error } = await supabase.storage.from(IDENTITY_BUCKET).download(side === "front" ? row.front_path : row.back_path);
+      if (error || !blob) return res.status(404).json({ error: "الصورة غير موجودة" });
+      const buf = Buffer.from(await blob.arrayBuffer());
+      res.setHeader("Content-Type", blob.type || "image/jpeg");
+      res.setHeader("Cache-Control", "private, no-store");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.send(buf);
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  app.post("/api/admin/identity/requests/:id/approve", async (req, res) => {
+    try {
+      if (!isValidId(req.params.id)) return res.status(400).json({ error: "معرف غير صحيح" });
+      const { data: upd, error } = await supabase.from("identity_verifications")
+        .update({ status: "approved", reject_reason: null, reviewed_by: adminIdentity(req), reviewed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .eq("id", req.params.id).eq("status", "pending").select("user_id").maybeSingle();
+      if (error) throw error;
+      if (!upd) return res.status(409).json({ error: "الطلب غير موجود أو تمت مراجعته مسبقاً" });
+      const { error: uErr } = await supabase.from("users").update({ identity_verified: true }).eq("id", upd.user_id);
+      if (uErr) throw uErr;
+      logAdminActivity({ action_type: "identity_approved", target_model: "identity_verifications", target_id: String(req.params.id), details: `قبول توثيق هوية المستخدم #${upd.user_id}`, req }).catch(() => {});
+      res.json({ success: true });
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  app.post("/api/admin/identity/requests/:id/reject", async (req, res) => {
+    try {
+      if (!isValidId(req.params.id)) return res.status(400).json({ error: "معرف غير صحيح" });
+      const reason = String(req.body?.reason || "").trim().slice(0, 300);
+      if (reason.length < 3) return res.status(400).json({ error: "سبب الرفض مطلوب" });
+      const { data: upd, error } = await supabase.from("identity_verifications")
+        .update({ status: "rejected", reject_reason: reason, reviewed_by: adminIdentity(req), reviewed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .eq("id", req.params.id).eq("status", "pending").select("user_id").maybeSingle();
+      if (error) throw error;
+      if (!upd) return res.status(409).json({ error: "الطلب غير موجود أو تمت مراجعته مسبقاً" });
+      logAdminActivity({ action_type: "identity_rejected", target_model: "identity_verifications", target_id: String(req.params.id), details: `رفض توثيق هوية المستخدم #${upd.user_id}: ${reason}`, req }).catch(() => {});
+      res.json({ success: true });
+    } catch (e: any) { safeError(res, e, undefined, req); }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // [PHASE-2] محرك قواعد الخصم — إدارة القواعد + أدوات اختيار النطاق + تعديل الربح بالجملة
   // ═══════════════════════════════════════════════════════════════════════════
   const DISCOUNT_PRODUCT_COLS = "id, name, price, price_per_unit, store_type, default_profit, subcategory_id, sub_sub_category_id, category_id, markup_type, markup_value";
@@ -11532,7 +11654,7 @@ ${userContext}
         .from("orders")
         .select(`
           *,
-          users(id, name, email, phone, avatar_url, is_vip, is_banned, is_blocked, blocked_until, balance),
+          users(id, name, email, phone, avatar_url, is_vip, is_banned, is_blocked, blocked_until, balance, identity_verified),
           order_items(
             *,
             products(
@@ -11591,6 +11713,7 @@ ${userContext}
         return {
           ...order,
           user_name: order.users?.name || "مستخدم محذوف",
+          user_identity_verified: !!order.users?.identity_verified,
           user_email: order.users?.email || "—",
           user_phone: order.users?.phone || "—",
           user_db_id: order.users?.id || order.user_id,
@@ -11981,13 +12104,14 @@ ${responseText}`);
     try {
       const { data, error } = await supabase
         .from("transactions")
-        .select("*, users(id, name, email, phone), payment_methods(name)")
+        .select("*, users(id, name, email, phone, identity_verified), payment_methods(name)")
         .order("created_at", { ascending: false });
       if (error) throw error;
       // flatten user info
       const enriched = (data || []).map((t: any) => ({
         ...t,
         user_name: t.users?.name || "—",
+        user_identity_verified: !!t.users?.identity_verified,
         user_email: t.users?.email || "—",
         user_phone: t.users?.phone || "—",
         user_db_id: t.users?.id || t.user_id,
@@ -12146,6 +12270,7 @@ ${responseText}`);
           transaction_id: inv.transaction_id,
           user_id: inv.user_id,
           user_name: inv.users?.name || "—",
+          user_identity_verified: !!inv.users?.identity_verified,
           user_email: inv.users?.email || "—",
           user_db_id: inv.users?.id || inv.user_id,
           payment_method_id: inv.payment_method_id,
@@ -12167,7 +12292,7 @@ ${responseText}`);
         const rawStatusForQuery = statusFilter === "expired" ? "pending" : statusFilter;
         const { data, error } = await supabase
           .from("shamcash_invoices")
-          .select("*, users(id, name, email, phone), payment_methods(name)")
+          .select("*, users(id, name, email, phone, identity_verified), payment_methods(name)")
           .eq("status", rawStatusForQuery)
           .order("created_at", { ascending: false })
           .limit(300);
@@ -12179,7 +12304,7 @@ ${responseText}`);
 
       const { data, error } = await supabase
         .from("shamcash_invoices")
-        .select("*, users(id, name, email, phone), payment_methods(name)")
+        .select("*, users(id, name, email, phone, identity_verified), payment_methods(name)")
         .order("created_at", { ascending: false })
         .range(offset, offset + limit - 1);
       if (error) throw error;
@@ -12509,7 +12634,7 @@ ${responseText}`);
 
   app.post("/api/admin/payment-methods", async (req, res) => {
     try {
-      const { name, image_url, wallet_address, qr_enabled, qr_always_open, qr_mode, qr_image_url, instructions, description, min_amount, active, method_type, api_account, payment_currency, custom_fields, bonus_type, bonus_percent, bonus_visible } = req.body;
+      const { name, image_url, wallet_address, qr_enabled, qr_always_open, qr_mode, qr_image_url, requires_identity, instructions, description, min_amount, active, method_type, api_account, payment_currency, custom_fields, bonus_type, bonus_percent, bonus_visible } = req.body;
       let { currency_id } = req.body;
 
       const normalizedBonusType = ["commission", "bonus"].includes(bonus_type) ? bonus_type : null;
@@ -12558,7 +12683,7 @@ ${responseText}`);
       const normQrMode = (qr_mode === "image" && normQrImage) ? "image" : "auto";
 
       const { data, error } = await supabase.from("payment_methods").insert({
-        qr_mode: normQrMode, qr_image_url: normQrImage,
+        qr_mode: normQrMode, qr_image_url: normQrImage, requires_identity: !!requires_identity,
         name, image_url, wallet_address, instructions, description: description || null, min_amount: isNaN(normalizedMinAmount) ? 0 : normalizedMinAmount, active,
         qr_enabled: !!qr_enabled && !!String(wallet_address || "").trim(),
         qr_always_open: !!qr_always_open && !!qr_enabled && !!String(wallet_address || "").trim(),
@@ -13947,7 +14072,7 @@ ${responseText}`);
 
   app.patch("/api/admin/payment-methods/:id", async (req, res) => {
     try {
-      const { name, image_url, wallet_address, qr_enabled, qr_always_open, qr_mode, qr_image_url, min_amount, instructions, description, custom_fields, currency_id, payment_currency, method_type, bonus_type, bonus_percent, bonus_visible } = req.body;
+      const { name, image_url, wallet_address, qr_enabled, qr_always_open, qr_mode, qr_image_url, requires_identity, min_amount, instructions, description, custom_fields, currency_id, payment_currency, method_type, bonus_type, bonus_percent, bonus_visible } = req.body;
       // [SECURITY FIX] نفس الإصلاح المطبَّق على مسار الإنشاء
       if (image_url !== undefined && image_url && !isValidUrl(image_url)) {
         return res.status(400).json({ error: "رابط الصورة غير صحيح" });
@@ -13958,6 +14083,7 @@ ${responseText}`);
       if (wallet_address !== undefined) updateData.wallet_address = wallet_address;
       if (qr_enabled !== undefined) updateData.qr_enabled = !!qr_enabled;
       if (qr_always_open !== undefined) updateData.qr_always_open = !!qr_always_open;
+      if (requires_identity !== undefined) updateData.requires_identity = !!requires_identity; // [PHASE-3]
       // [PHASE-1] مصدر الـ QR (auto | image) — التحقق من السيرفر
       if (qr_mode !== undefined || qr_image_url !== undefined) {
         if (qr_image_url && !isValidUrl(qr_image_url)) {
