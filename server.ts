@@ -1901,6 +1901,41 @@ async function notifyIdentityResult(userId: number | string, approved: boolean, 
   try { await userBot.sendMessage(u.telegram_chat_id, text); } catch {}
 }
 
+// [PHASE-BOTS] قبول عملية شحن بنفس منطق الموقع تماماً (بونص/عمولة طريقة الدفع + قفل ذرّي ضد القبول المزدوج
+// + إحصائيات الشحن + إشعار داخل التطبيق/تيليجرام). يستخدمها بوت الأدمن بدل الإضافة المباشرة للرصيد.
+async function approveTransactionCore(txId: number | string, customAmount?: number): Promise<{ ok: boolean; finalAmount?: number; error?: string }> {
+  const { data: tx, error: txErr } = await supabase.from("transactions").select("*").eq("id", txId).single();
+  if (txErr || !tx) return { ok: false, error: "العملية غير موجودة" };
+  if (tx.status !== "pending") return { ok: false, error: "تمت معالجة هذه العملية بالفعل" };
+  const baseAmount = (customAmount !== undefined && Number.isFinite(customAmount) && customAmount > 0) ? customAmount : Number(tx.amount);
+  let finalAmount = baseAmount;
+  let bonusSnapshot: { bonus_type: string | null; bonus_percent: number | null } = { bonus_type: null, bonus_percent: null };
+  if (tx.payment_method_id) {
+    const { data: pmForBonus } = await supabase.from("payment_methods").select("bonus_type, bonus_percent").eq("id", tx.payment_method_id).maybeSingle();
+    finalAmount = applyPaymentMethodBonus(baseAmount, pmForBonus);
+    if (pmForBonus?.bonus_type && pmForBonus?.bonus_percent) bonusSnapshot = { bonus_type: pmForBonus.bonus_type, bonus_percent: pmForBonus.bonus_percent };
+  }
+  const { data: casRows, error: casErr } = await supabase.from("transactions")
+    .update({ status: "approved", amount: finalAmount, original_amount: baseAmount, bonus_type: bonusSnapshot.bonus_type, bonus_percent: bonusSnapshot.bonus_percent })
+    .eq("id", txId).eq("status", "pending").select("id");
+  if (casErr) return { ok: false, error: "تعذّر تحديث العملية" };
+  if (!Array.isArray(casRows) || casRows.length === 0) return { ok: false, error: "تمت معالجة هذه العملية بالفعل" };
+  const { error: incErr } = await supabase.rpc("increment_balance", { user_id_param: tx.user_id, amount_param: finalAmount });
+  if (incErr) {
+    notifyAdmins("system_alerts", `🚨 عملية شحن #${txId} صارت "approved" لكن فشلت إضافة الرصيد فعلياً للمستخدم #${tx.user_id}. يتطلب تدخلاً يدوياً عاجلاً.`);
+    return { ok: false, error: "فشلت إضافة الرصيد" };
+  }
+  try {
+    const { data: st } = await supabase.from("user_stats").select("total_recharge_sum").eq("user_id", tx.user_id).single();
+    await supabase.from("user_stats").update({ total_recharge_sum: Number(st?.total_recharge_sum || 0) + finalAmount }).eq("user_id", tx.user_id);
+  } catch (e) { console.error("[approveTransactionCore] stats:", e); }
+  try {
+    const { data: n } = await supabase.from("notifications").insert({ user_id: tx.user_id, title: "تم قبول الشحن", message: `تمت إضافة ${finalAmount}$ إلى رصيدك بنجاح.`, type: "success" }).select("id, created_at").single();
+    if (n?.id) pushUserNotification(tx.user_id, { id: n.id, title: "تم قبول الشحن", message: `تمت إضافة ${finalAmount}$ إلى رصيدك بنجاح.`, type: "success", created_at: n.created_at }).catch(() => {});
+  } catch (e) { console.error("[approveTransactionCore] notification:", e); }
+  return { ok: true, finalAmount };
+}
+
 // [PHASE-BOTS] ميزات بوت المستخدمين الجديدة (توثيق الهوية، الرتب، QR، الشريط، علامة ✅)
 const userExtras = createUserExtras({ supabase, storeCore, getBot: () => userBot, states: userStates });
 
@@ -17109,14 +17144,12 @@ async function startBots(isHotRestart: boolean = false) {
           const txId = data.split("_")[2];
           const { data: tx } = await supabase.from("transactions").select("*").eq("id", txId).single();
           if (tx && tx.status === "pending") {
-            await supabase.from("transactions").update({ status: "approved" }).eq("id", txId);
-            await supabase.rpc("increment_balance", { user_id_param: tx.user_id, amount_param: tx.amount });
-            const { data: statsRowTgApprove } = await supabase.from("user_stats").select("total_recharge_sum").eq("user_id", tx.user_id).single();
-            await supabase.from("user_stats").update({ total_recharge_sum: Number(statsRowTgApprove?.total_recharge_sum || 0) + Number(tx.amount) }).eq("user_id", tx.user_id);
-
-            const { data: user } = await supabase.from("users").select("telegram_chat_id").eq("id", tx.user_id).single();
-            if (user?.telegram_chat_id) {
-              userBot?.sendMessage(user.telegram_chat_id, `✅ تم قبول طلب الشحن الخاص بك! تم إضافة ${tx.amount}$ لرصيدك.`);
+            const apr = await approveTransactionCore(txId);
+            if (!apr.ok) {
+              try { await adminBot!.answerCallbackQuery(query.id, { text: `⚠️ ${apr.error}`, show_alert: true }); } catch {}
+              await updateAllTrackedNotifications(adminBot!, "tx", txId, await buildTxNotificationSummary(txId));
+              clearTrackedNotification("tx", txId);
+              return;
             }
             const respSecondsTx = calcResponseTimeSeconds(tx.created_at);
             try { await adminBot!.answerCallbackQuery(query.id, { text: `✅ تم قبول العملية #TX${txId}${respSecondsTx !== null ? ` (⏱️ ${respSecondsTx} ثانية)` : ""}` }); } catch {}
@@ -17177,13 +17210,8 @@ async function startBots(isHotRestart: boolean = false) {
             if (text === "تم") {
               const { data: tx } = await supabase.from("transactions").select("*").eq("id", txId).single();
               if (tx && tx.status === "pending") {
-                await supabase.from("transactions").update({ status: "approved" }).eq("id", txId);
-                await supabase.rpc("increment_balance", { user_id_param: tx.user_id, amount_param: tx.amount });
-                const { data: user } = await supabase.from("users").select("telegram_chat_id").eq("id", tx.user_id).single();
-                if (user?.telegram_chat_id) {
-                  userBot?.sendMessage(user.telegram_chat_id, `✅ تم قبول طلب الشحن الخاص بك! تم إضافة ${tx.amount}$ لرصيدك.`);
-                }
-                adminBot!.sendMessage(chatId, `✅ تم قبول الشحن #TX${txId}`);
+                const apr2 = await approveTransactionCore(txId);
+                adminBot!.sendMessage(chatId, apr2.ok ? `✅ تم قبول الشحن #TX${txId} (أُضيف ${apr2.finalAmount}$ بعد البونص/العمولة)` : `⚠️ ${apr2.error}`);
               }
             } else if (text === "رفض") {
               await supabase.from("transactions").update({ status: "rejected" }).eq("id", txId);
@@ -18973,7 +19001,7 @@ async function startBots(isHotRestart: boolean = false) {
             const fileRes = await fetch(fileUrl);
             const buffer = await fileRes.arrayBuffer();
             const receiptUrl = await uploadBufferToImgbb(buffer);
-            const { data: method } = await supabase.from("payment_methods").select("name").eq("id", state.data.methodId).single();
+            const { data: method } = await supabase.from("payment_methods").select("name, bonus_type, bonus_percent").eq("id", state.data.methodId).single();
             {
               const gateRc = await userExtras.identityGate(user.id, state.data.methodId);
               if (gateRc) { userStates.delete(chatId); return void userBot!.sendMessage(chatId, `🔒 ${gateRc}`); }
@@ -18990,6 +19018,8 @@ async function startBots(isHotRestart: boolean = false) {
               amount: state.data.amount,
               status: "pending",
               payment_method_id: state.data.methodId,
+              bonus_type: (method as any)?.bonus_type || null,
+              bonus_percent: (method as any)?.bonus_percent || null,
               receipt_image_url: receiptUrl,
               tx_number: state.data.txNumber || null,
               custom_fields_data: customFieldsData ? JSON.stringify(customFieldsData) : null
