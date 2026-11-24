@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express from "express";
+import { createBotPricing, botNormEmail, botValidEmail, botValidPhone } from "./botHelpers";
 import { loadDiscountRules, resolveDiscountPercent, sanitizeRulesInput, maxDiscountPercentForCost, pickMostSpecificRule } from "./discountEngine";
 import helmet from "helmet";
 import hpp from "hpp";
@@ -1865,9 +1866,49 @@ function computeOrderNetProfit(product: any, total: number, qty: number, costPer
   return 0;
 }
 
+// ============================================================
+// [BOT-PARITY] أدوات تطابق الموقع: نسبة الخصم الفعلية للمستخدم (VIP/رتبة/مدى الحياة/مؤقت/منتج واحد) عبر
+// محرك القواعد نفسه + حماية التكلفة — لتكون أسعار البوت مطابقة تماماً لأسعار الموقع.
+// ============================================================
+const { botDiscountPercent, botFinalPrice } = createBotPricing(supabase);
+
+// ربط حساب بمحادثة تيليجرام: يفكّ ارتباط أي حساب آخر بنفس المحادثة (وإلا تفشل كل استعلامات .single() لاحقاً)
+async function bindTelegramChat(userId: number | string, chatId: number) {
+  await supabase.from("users").update({ telegram_chat_id: null }).eq("telegram_chat_id", chatId).neq("id", userId);
+  await supabase.from("users").update({ telegram_chat_id: chatId }).eq("id", userId);
+}
+
+// تحديد محاولات الدخول/التحقق لكل محادثة (حماية من تخمين كلمة السر ورمز OTP)
+const botAuthFails = new Map<number, { count: number; lockedUntil: number }>();
+function botAuthLocked(chatId: number): number {
+  const e = botAuthFails.get(chatId);
+  return e && e.lockedUntil > Date.now() ? Math.ceil((e.lockedUntil - Date.now()) / 60000) : 0;
+}
+function botAuthFail(chatId: number, max = 5, lockMin = 15): boolean {
+  const e = botAuthFails.get(chatId) || { count: 0, lockedUntil: 0 };
+  e.count += 1;
+  if (e.count >= max) { e.lockedUntil = Date.now() + lockMin * 60000; e.count = 0; botAuthFails.set(chatId, e); return true; }
+  botAuthFails.set(chatId, e); return false;
+}
+const botOtpLastSent = new Map<string, number>();
+
 // --- Process Bot Order (Supabase) ---
-async function processBotOrder(chatId: number, user: any, product: any, price: number, extraData: any, quantity: number = 1) {
+async function processBotOrder(chatId: number, user: any, product: any, price: number, extraData: any, quantity: number = 1, baseTotal?: number) {
   try {
+    // [BOT-PARITY] إعادة قراءة المستخدم: فحص الحظر (كالموقع) + أحدث VIP/رتبة، ثم إعادة حساب السعر النهائي
+    // من السيرفر بنفس منطق الموقع (ويُستهلك خصم "المنتج الواحد" هنا فقط).
+    {
+      const { data: freshU } = await supabase.from("users").select("*").eq("id", user.id).single();
+      if (freshU) user = freshU;
+      const banState = await checkAndClearBan(user);
+      if (banState.banned || user.is_blocked) {
+        userBot?.sendMessage(chatId, `❌ ${banState.message || "حسابك موقوف. تواصل مع الدعم."}`);
+        return;
+      }
+      if (typeof baseTotal === "number" && baseTotal >= 0) {
+        price = (await botFinalPrice(user, product, baseTotal, true)).final;
+      }
+    }
     const safeQty = Math.max(1, Math.floor(Number(quantity) || 1));
     const { data: order, error: orderErr } = await supabase.from("orders").insert({
       user_id: user.id,
@@ -17703,7 +17744,7 @@ async function startBots(isHotRestart: boolean = false) {
         const now = new Date().toISOString();
         const { data: linkingCode } = await supabase.from("telegram_linking_codes").select("*").eq("code", startParam).gt("expires_at", now).single();
         if (linkingCode) {
-          await supabase.from("users").update({ telegram_chat_id: chatId }).eq("id", linkingCode.user_id);
+          await bindTelegramChat(linkingCode.user_id, chatId);
           await supabase.from("telegram_linking_codes").delete().eq("id", linkingCode.id);
           const { data: user } = await supabase.from("users").select("*").eq("id", linkingCode.user_id).single();
           userBot!.sendMessage(chatId, "✅ تم ربط حسابك بنجاح!");
@@ -17712,7 +17753,9 @@ async function startBots(isHotRestart: boolean = false) {
         }
 
         // Referral code
-        const { data: referrer } = await supabase.from("users").select("id").eq("id", startParam).single();
+        const { data: referrer } = /^[0-9]{1,12}$/.test(startParam)
+          ? await supabase.from("users").select("id").eq("id", startParam).maybeSingle()
+          : { data: null as any };
         if (referrer) {
           userStates.set(chatId, { step: "register_name", data: { referralCode: startParam } });
           userBot!.sendMessage(chatId, `مرحباً بك! لقد تمت دعوتك.\nيرجى إدخال اسمك الكامل لإنشاء حساب:`);
@@ -18579,7 +18622,9 @@ async function startBots(isHotRestart: boolean = false) {
         const count = referrals?.length || 0;
         const botInfo = await userBot!.getMe();
         const referralLink = `https://t.me/${botInfo.username}?start=${user.id}`;
-        userBot!.sendMessage(chatId, `🔗 نظام الإحالة:\n\nرابط الإحالة الخاص بك:\n${referralLink}\n\nعدد المستخدمين المسجلين عبر رابطك: ${count}\n\nتحصل على عمولة 5% عن كل عملية شراء!`);
+        const { data: refRateRow } = await supabase.from("settings").select("value").eq("key", "referral_commission").maybeSingle();
+        const refRatePct = parseFloat(refRateRow?.value || "5") || 5;
+        userBot!.sendMessage(chatId, `🔗 نظام الإحالة:\n\nرابط الإحالة الخاص بك:\n${referralLink}\n\nعدد المستخدمين المسجلين عبر رابطك: ${count}\n\nتحصل على عمولة ${refRatePct}% من صافي ربح كل طلب يشتريه من أحلته!`);
 
       } else if (data === "share") {
         const { data: user } = await supabase.from("users").select("id").eq("telegram_chat_id", chatId).single();
@@ -18692,7 +18737,7 @@ async function startBots(isHotRestart: boolean = false) {
           return;
         }
 
-        const { data: products } = await supabase.from("products").select("*").eq("subcategory_id", subId).eq("available", true);
+        const products = await fetchAllRowsPaged((f, t) => supabase.from("products").select("*").eq("subcategory_id", subId).eq("available", true).order("order_index", { ascending: true }).order("id", { ascending: true }).range(f, t)); // [FIX-PAGINATION] + ترتيب الموقع
         if (!products || products.length === 0) return userBot!.sendMessage(chatId, "لا توجد منتجات متاحة.");
         const { data: subRow } = await supabase.from("subcategories").select("category_id").eq("id", subId).single();
         const { data: currentUser1 } = await supabase.from("users").select("is_vip").eq("telegram_chat_id", chatId).single();
@@ -18709,7 +18754,7 @@ async function startBots(isHotRestart: boolean = false) {
 
       } else if (data?.startsWith("subsub_")) {
         const subSubId = data.split("_")[1];
-        const { data: products } = await supabase.from("products").select("*").eq("sub_sub_category_id", subSubId).eq("available", true);
+        const products = await fetchAllRowsPaged((f, t) => supabase.from("products").select("*").eq("sub_sub_category_id", subSubId).eq("available", true).order("order_index", { ascending: true }).order("id", { ascending: true }).range(f, t)); // [FIX-PAGINATION] + ترتيب الموقع
         if (!products || products.length === 0) return userBot!.sendMessage(chatId, "لا توجد منتجات متاحة.");
         const { data: subSubRow } = await supabase.from("sub_sub_categories").select("subcategory_id").eq("id", subSubId).single();
         const { data: currentUser2 } = await supabase.from("users").select("is_vip").eq("telegram_chat_id", chatId).single();
@@ -18724,12 +18769,12 @@ async function startBots(isHotRestart: boolean = false) {
         const { data: currentUserPg } = await supabase.from("users").select("is_vip").eq("telegram_chat_id", chatId).single();
 
         if (kind === "s") {
-          const { data: products } = await supabase.from("products").select("*").eq("subcategory_id", refId).eq("available", true);
+          const products = await fetchAllRowsPaged((f, t) => supabase.from("products").select("*").eq("subcategory_id", refId).eq("available", true).order("order_index", { ascending: true }).order("id", { ascending: true }).range(f, t)); // [FIX-PAGINATION] + ترتيب الموقع
           if (!products || products.length === 0) return userBot!.sendMessage(chatId, "لا توجد منتجات متاحة.");
           const { data: subRow } = await supabase.from("subcategories").select("category_id").eq("id", refId).single();
           await sendProductsList(chatId, products, `back_sub_${subRow?.category_id}`, currentUserPg, pageNum, `prodpage_s_${refId}`, query.message?.message_id);
         } else {
-          const { data: products } = await supabase.from("products").select("*").eq("sub_sub_category_id", refId).eq("available", true);
+          const products = await fetchAllRowsPaged((f, t) => supabase.from("products").select("*").eq("sub_sub_category_id", refId).eq("available", true).order("order_index", { ascending: true }).order("id", { ascending: true }).range(f, t)); // [FIX-PAGINATION] + ترتيب الموقع
           if (!products || products.length === 0) return userBot!.sendMessage(chatId, "لا توجد منتجات متاحة.");
           const { data: subSubRow } = await supabase.from("sub_sub_categories").select("subcategory_id").eq("id", refId).single();
           await sendProductsList(chatId, products, `back_subsub_${subSubRow?.subcategory_id}`, currentUserPg, pageNum, `prodpage_x_${refId}`, query.message?.message_id);
@@ -18771,7 +18816,8 @@ async function startBots(isHotRestart: boolean = false) {
           return;
         }
 
-        const price = user.is_vip ? product.price * 0.95 : product.price;
+        const baseTotal = Number(product.price) || 0;
+        const price = (await botFinalPrice(user, product, baseTotal)).final;
         if (user.balance < price) return userBot!.sendMessage(chatId, `❌ رصيدك غير كافٍ. السعر: ${price.toFixed(2)}$ ورصيدك: ${user.balance.toFixed(2)}$`);
 
         if (product.store_type === "quick_order" || (product.requires_input && product.store_type !== "quantities") || hasProductFields(product.custom_fields)) {
@@ -18779,7 +18825,7 @@ async function startBots(isHotRestart: boolean = false) {
 
           userStates.set(chatId, {
             step: "quick_order_field",
-            data: { productId: prodId, price, product, user, fields: orderedFields, fieldIndex: 0, fieldValues: {} }
+            data: { productId: prodId, price, baseTotal, product, user, fields: orderedFields, fieldIndex: 0, fieldValues: {} }
           });
           const firstField = orderedFields[0];
           userBot!.sendMessage(chatId, `يرجى إدخال "${firstField.label}"${firstField.required ? "" : " (اختياري، أرسل - للتخطي)"}:`);
@@ -18788,10 +18834,10 @@ async function startBots(isHotRestart: boolean = false) {
 
         if (product.requires_input) {
           const prompt = "يرجى إدخال البيانات المطلوبة للمنتج:";
-          userStates.set(chatId, { step: "purchase_input", data: { productId: prodId, price, product, user } });
+          userStates.set(chatId, { step: "purchase_input", data: { productId: prodId, price, baseTotal, product, user } });
           userBot!.sendMessage(chatId, prompt);
         } else {
-          processBotOrder(chatId, user, product, price, {});
+          processBotOrder(chatId, user, product, price, {}, 1, baseTotal);
         }
 
       } else if (data?.startsWith("confirm_quick_order")) {
@@ -18802,7 +18848,8 @@ async function startBots(isHotRestart: boolean = false) {
 
         const freshUser = (await supabase.from("users").select("*").eq("telegram_chat_id", chatId).single()).data;
         if (!freshUser) return userBot!.sendMessage(chatId, "يرجى تسجيل الدخول أولاً.");
-        const finalPrice = freshUser.is_vip ? product.price * 0.95 : product.price;
+        const confirmBase = Number(state.data.baseTotal ?? product.price) || 0;
+        const finalPrice = (await botFinalPrice(freshUser, product, confirmBase)).final;
         if (freshUser.balance < finalPrice) return userBot!.sendMessage(chatId, `❌ رصيدك غير كافٍ. السعر: ${finalPrice.toFixed(2)}$ ورصيدك: ${freshUser.balance.toFixed(2)}$`);
 
         const primaryValue = fieldValues[defaultFields[0]?.id] || "";
@@ -18816,7 +18863,7 @@ async function startBots(isHotRestart: boolean = false) {
             : undefined
         };
 
-        processBotOrder(chatId, freshUser, product, finalPrice, extraData, state.data.quantity || 1);
+        processBotOrder(chatId, freshUser, product, finalPrice, extraData, state.data.quantity || 1, confirmBase);
 
       } else if (data === "cancel_order") {
         userStates.delete(chatId);
@@ -18849,9 +18896,10 @@ async function startBots(isHotRestart: boolean = false) {
         const storeTypeLabel = storeTypeLabels[product.store_type] || product.store_type || "عادي";
 
         let text = `🛍️ ${product.name}\n\n${product.description || ""}\n\n💵 السعر: ${product.price}$`;
-        if (user?.is_vip) {
-          const vipPrice = product.price * 0.95;
-          text += `\n💎 سعر VIP: ${vipPrice.toFixed(2)}$`;
+        if (user) {
+          // [BOT-PARITY] نسبة الخصم الفعلية لهذا المنتج (VIP/رتبة/...) كما يحسبها الموقع
+          const dp = await botDiscountPercent(user, product, false);
+          if (dp > 0) text += `\n💎 سعرك بعد الخصم (${+dp.toFixed(2)}%): ${(Number(product.price) * (1 - dp / 100)).toFixed(2)}$`;
         }
         text += `\n📦 نوع المتجر: ${storeTypeLabel}`;
 
@@ -18898,7 +18946,7 @@ async function startBots(isHotRestart: boolean = false) {
         const { data: linkingCode } = await supabase.from("telegram_linking_codes").select("*").eq("code", code).gt("expires_at", now).single();
         if (linkingCode) {
           const { data: user } = await supabase.from("users").select("*").eq("id", linkingCode.user_id).single();
-          await supabase.from("users").update({ telegram_chat_id: chatId }).eq("id", linkingCode.user_id);
+          await bindTelegramChat(linkingCode.user_id, chatId);
           await supabase.from("telegram_linking_codes").delete().eq("id", linkingCode.id);
           userStates.delete(chatId);
           userBot!.sendMessage(chatId, "✅ تم تسجيل الدخول بنجاح عبر الكود!");
@@ -19286,14 +19334,16 @@ async function startBots(isHotRestart: boolean = false) {
         const defaultFields = fields.filter((f: any) => f.isDefault);
         const customFields = fields.filter((f: any) => !f.isDefault);
         const primaryValue = fieldValues[defaultFields[0]?.id] || "";
-        const finalPrice = user.is_vip ? product.price * 0.95 : product.price;
+        // [BOT-PARITY] الإجمالي = سعر الوحدة × الكمية (كان يُتجاهل qty لمنتجات "الكميات") ثم خصم الموقع نفسه
+        const fieldsBase = Number(state.data.baseTotal ?? product.price) || 0;
+        const finalPrice = (await botFinalPrice(user, product, fieldsBase)).final;
 
         userStates.set(chatId, {
           step: "quick_order_confirm",
-          data: { product, user, price: finalPrice, fieldValues, defaultFields, customFields, quantity: state.data.quantity || 1 }
+          data: { product, user, price: finalPrice, baseTotal: fieldsBase, fieldValues, defaultFields, customFields, quantity: state.data.quantity || 1 }
         });
 
-        let confirmText = `تأكيد الطلب:\nالمنتج: ${product.name}\nالمعرف: ${primaryValue}\nالكمية: 1\nالسعر الإجمالي: ${finalPrice.toFixed(2)}$`;
+        let confirmText = `تأكيد الطلب:\nالمنتج: ${product.name}\nالمعرف: ${primaryValue}\nالكمية: ${state.data.quantity || 1}\nالسعر الإجمالي: ${finalPrice.toFixed(2)}$`;
         if (customFields.length > 0) {
           confirmText += "\n\nحقول إضافية:\n" + customFields.map((f: any) => `${f.label}: ${fieldValues[f.id] || "-"}`).join("\n");
         }
@@ -19311,7 +19361,7 @@ async function startBots(isHotRestart: boolean = false) {
         const { product, user, price, quantity } = state.data;
         const extraData = product.store_type === "quick_order" ? { playerId: text, storeType: "quick_order" } : { input: text };
         userStates.delete(chatId);
-        processBotOrder(chatId, user, product, price, extraData, quantity || 1);
+        processBotOrder(chatId, user, product, price, extraData, quantity || 1, Number(state.data.baseTotal ?? product.price) || 0);
 
       } else if (state.step === "quantity_input") {
         // [FIX] معالجة إدخال الكمية لمنتجات نوع quantities، يطابق التحقق في CheckoutPage.tsx و /api/orders
@@ -19332,7 +19382,7 @@ async function startBots(isHotRestart: boolean = false) {
         const freshUser = (await supabase.from("users").select("*").eq("telegram_chat_id", chatId).single()).data;
         if (!freshUser) { userStates.delete(chatId); return userBot!.sendMessage(chatId, "يرجى تسجيل الدخول أولاً."); }
         const baseTotal = unitPrice * qty;
-        const finalPrice = freshUser.is_vip ? baseTotal * 0.95 : baseTotal;
+        const finalPrice = (await botFinalPrice(freshUser, product, baseTotal)).final;
         if (freshUser.balance < finalPrice) {
           userStates.delete(chatId);
           return userBot!.sendMessage(chatId, `❌ رصيدك غير كافٍ. الإجمالي: ${finalPrice.toFixed(2)}$ ورصيدك: ${freshUser.balance.toFixed(2)}$`);
@@ -19343,55 +19393,90 @@ async function startBots(isHotRestart: boolean = false) {
 
           userStates.set(chatId, {
             step: "quick_order_field",
-            data: { productId: product.id, price: finalPrice, product, user: freshUser, fields: orderedFields, fieldIndex: 0, fieldValues: {}, quantity: qty }
+            data: { productId: product.id, price: finalPrice, baseTotal, product, user: freshUser, fields: orderedFields, fieldIndex: 0, fieldValues: {}, quantity: qty }
           });
           const firstField = orderedFields[0];
           userBot!.sendMessage(chatId, `يرجى إدخال "${firstField.label}"${firstField.required ? "" : " (اختياري، أرسل - للتخطي)"}:`);
         } else {
-          processBotOrder(chatId, freshUser, product, finalPrice, { quantity: qty }, qty);
+          processBotOrder(chatId, freshUser, product, finalPrice, { quantity: qty }, qty, baseTotal);
         }
 
       } else if (state.step === "login_email") {
-        state.data.email = text;
+        const loginEmail = botNormEmail(text);
+        if (!botValidEmail(loginEmail)) return userBot!.sendMessage(chatId, "❌ صيغة البريد الإلكتروني غير صحيحة، أعد إدخاله:");
+        state.data.email = loginEmail;
         state.step = "login_password";
         userBot!.sendMessage(chatId, "يرجى إدخال كلمة المرور:");
 
       } else if (state.step === "login_password") {
-        const { data: user } = await supabase.from("users").select("*").eq("email", state.data.email).single();
-        if (user) {
-          const isMatch = await bcrypt.compare(text, user.password_hash);
-          if (isMatch) {
-            await supabase.from("users").update({ telegram_chat_id: chatId }).eq("id", user.id);
-            userStates.delete(chatId);
-            userBot!.sendMessage(chatId, "✅ تم تسجيل الدخول بنجاح!");
-            sendMainMenu(chatId, user, userBot!);
-            return;
-          }
+        // حذف رسالة كلمة المرور من المحادثة فوراً
+        userBot!.deleteMessage(chatId, msg.message_id).catch(() => {});
+        const lockedMin = botAuthLocked(chatId);
+        if (lockedMin) {
+          userStates.delete(chatId);
+          return userBot!.sendMessage(chatId, `⛔ محاولات كثيرة خاطئة. حاول بعد ${lockedMin} دقيقة.`);
         }
-        userBot!.sendMessage(chatId, "❌ البريد الإلكتروني أو كلمة المرور غير صحيحة. حاول مرة أخرى /start");
+        const { data: user } = await supabase.from("users").select("*").eq("email", state.data.email).maybeSingle();
+        if (user && !user.password_hash) {
+          userStates.delete(chatId);
+          return userBot!.sendMessage(chatId, "ℹ️ هذا الحساب مسجّل عبر Google ولا يملك كلمة مرور. من الموقع (حسابي) أنشئ كود ربط، ثم اختر «تسجيل عبر كود الربط».");
+        }
+        if (user && await bcrypt.compare(String(text), user.password_hash)) {
+          if (!user.is_verified) {
+            userStates.delete(chatId);
+            return userBot!.sendMessage(chatId, "❌ هذا الحساب غير مفعّل بعد. اختر «إنشاء حساب جديد» بنفس البريد لإرسال رمز التفعيل من جديد.");
+          }
+          const banState = await checkAndClearBan(user);
+          if (banState.banned || user.is_blocked) {
+            userStates.delete(chatId);
+            return userBot!.sendMessage(chatId, `❌ ${banState.message || "حسابك موقوف. تواصل مع الدعم."}`);
+          }
+          await bindTelegramChat(user.id, chatId);
+          botAuthFails.delete(chatId);
+          userStates.delete(chatId);
+          userBot!.sendMessage(chatId, "✅ تم تسجيل الدخول بنجاح!");
+          sendMainMenu(chatId, user, userBot!);
+          return;
+        }
+        const nowLocked = botAuthFail(chatId);
         userStates.delete(chatId);
+        userBot!.sendMessage(chatId, nowLocked
+          ? "⛔ محاولات كثيرة خاطئة. تم إيقاف المحاولات 15 دقيقة."
+          : "❌ البريد الإلكتروني أو كلمة المرور غير صحيحة. حاول مرة أخرى /start");
 
       } else if (state.step === "register_name") {
-        state.data.name = text;
+        const nm = String(text || "").replace(/\s+/g, " ").trim();
+        if (nm.length < 2 || nm.length > 60) return userBot!.sendMessage(chatId, "❌ الاسم يجب أن يكون بين 2 و60 حرفاً، أعد إدخاله:");
+        state.data.name = nm;
         state.step = "register_email";
         userBot!.sendMessage(chatId, "يرجى إدخال البريد الإلكتروني:");
 
       } else if (state.step === "register_email") {
-        state.data.email = text;
+        const regEmail = botNormEmail(text);
+        if (!botValidEmail(regEmail)) return userBot!.sendMessage(chatId, "❌ صيغة البريد الإلكتروني غير صحيحة، أعد إدخاله:");
+        state.data.email = regEmail;
         state.step = "register_phone";
         userBot!.sendMessage(chatId, "يرجى إدخال رقم الهاتف:");
 
       } else if (state.step === "register_phone") {
-        state.data.phone = text;
+        const ph = String(text || "").trim();
+        if (!botValidPhone(ph)) return userBot!.sendMessage(chatId, "❌ رقم الهاتف غير صحيح (أرقام فقط، 7 إلى 15 رقماً)، أعد إدخاله:");
+        state.data.phone = ph;
         state.step = "register_password";
         userBot!.sendMessage(chatId, "يرجى إدخال كلمة المرور (8 أحرف وأرقام على الأقل):");
 
       } else if (state.step === "register_password") {
+        userBot!.deleteMessage(chatId, msg.message_id).catch(() => {});
         const pw = text.trim();
         if (pw.length < 8 || !/[a-zA-Z]/.test(pw) || !/[0-9]/.test(pw)) {
           return userBot!.sendMessage(chatId, "❌ كلمة المرور يجب أن تكون 8 أحرف على الأقل وتحتوي على أحرف وأرقام. أعد الإدخال:");
         }
         state.data.password = pw;
+        // منع إغراق البريد برموز التحقق (رمز واحد كل 60 ثانية لكل بريد)
+        const lastSent = botOtpLastSent.get(state.data.email) || 0;
+        if (Date.now() - lastSent < 60000) {
+          return userBot!.sendMessage(chatId, `⏳ تم إرسال رمز قبل قليل. انتظر ${Math.ceil((60000 - (Date.now() - lastSent)) / 1000)} ثانية ثم أعد إرسال كلمة المرور.`);
+        }
         try {
           let referredById = null;
           if (state.data.referralCode) {
@@ -19403,7 +19488,7 @@ async function startBots(isHotRestart: boolean = false) {
           const hashedPassword = await bcrypt.hash(state.data.password, salt);
 
           // تحقق أن البريد غير مسجل
-          const { data: existing } = await supabase.from("users").select("id, is_verified").eq("email", state.data.email).single();
+          const { data: existing } = await supabase.from("users").select("id, is_verified").eq("email", state.data.email).maybeSingle();
           if (existing?.is_verified) {
             userStates.delete(chatId);
             return userBot!.sendMessage(chatId, "❌ هذا البريد الإلكتروني مسجل مسبقاً. استخدم /start لتسجيل الدخول.");
@@ -19411,7 +19496,7 @@ async function startBots(isHotRestart: boolean = false) {
 
           let userId: number;
           if (existing && !existing.is_verified) {
-            await supabase.from("users").update({ name: state.data.name, password_hash: hashedPassword, phone: state.data.phone, telegram_chat_id: chatId }).eq("id", existing.id);
+            await supabase.from("users").update({ name: state.data.name, password_hash: hashedPassword, phone: state.data.phone }).eq("id", existing.id);
             userId = existing.id;
           } else {
             const { data: newUser, error } = await supabase.from("users").insert({
@@ -19419,7 +19504,6 @@ async function startBots(isHotRestart: boolean = false) {
               email: state.data.email,
               password_hash: hashedPassword,
               phone: state.data.phone,
-              telegram_chat_id: chatId,
               referred_by_id: referredById,
               is_verified: false
             }).select().single();
@@ -19431,6 +19515,7 @@ async function startBots(isHotRestart: boolean = false) {
           // إرسال OTP للبريد
           const otp = await saveOtp(state.data.email, "verify");
           const sent = await sendOtpEmail(state.data.email, otp, "verify");
+          botOtpLastSent.set(state.data.email, Date.now());
           // [FIX] لا نطبع قيمة OTP في الـ logs
           console.log(`[BOT-REGISTER] OTP sent to ${state.data.email} | delivered=${sent}`);
 
@@ -19447,8 +19532,11 @@ async function startBots(isHotRestart: boolean = false) {
 
       } else if (state.step === "register_otp") {
         const code = text.trim();
+        const otpLocked = botAuthLocked(chatId);
+        if (otpLocked) { userStates.delete(chatId); return userBot!.sendMessage(chatId, `⛔ محاولات كثيرة خاطئة. حاول بعد ${otpLocked} دقيقة.`); }
         const valid = await verifyOtp(state.data.email, code, "verify");
         if (!valid) {
+          if (botAuthFail(chatId)) { userStates.delete(chatId); return userBot!.sendMessage(chatId, "⛔ محاولات كثيرة خاطئة. تم إيقاف المحاولات 15 دقيقة."); }
           return userBot!.sendMessage(chatId, "❌ الرمز غير صحيح أو منتهي الصلاحية. أعد الإدخال أو اكتب /start للبدء من جديد.");
         }
         // تفعيل الحساب
@@ -19457,6 +19545,8 @@ async function startBots(isHotRestart: boolean = false) {
           userStates.delete(chatId);
           return userBot!.sendMessage(chatId, "❌ حدث خطأ. حاول مرة أخرى /start");
         }
+        botAuthFails.delete(chatId);
+        await bindTelegramChat(user.id, chatId); // الربط يتم فقط بعد نجاح التحقق من البريد
         // إحالة
         // [FIX] تحديث referral_count في users و user_stats معاً
         if (user.referred_by_id) {
