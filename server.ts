@@ -1,6 +1,9 @@
 import "dotenv/config";
 import express from "express";
 import { createBotPricing, botNormEmail, botValidEmail, botValidPhone } from "./botHelpers";
+import { createStoreCore, CoreError } from "./storeCore";
+import { createAdminExtras } from "./adminBotExtras";
+import { createUserExtras } from "./userBotExtras";
 import { loadDiscountRules, resolveDiscountPercent, sanitizeRulesInput, maxDiscountPercentForCost, pickMostSpecificRule } from "./discountEngine";
 import helmet from "helmet";
 import hpp from "hpp";
@@ -597,6 +600,15 @@ const ADMIN_MENU_TREE: AdminMenuNode = {
       children: [
         { section: "users_search", label: "🔍 بحث عن مستخدم" },
         { section: "users_list", label: "📋 كل المستخدمين" },
+        { section: "identity", label: "🛡️ توثيق الهوية", perm: "manual_topup" },
+      ],
+    },
+    {
+      section: "pricing", label: "🏷️ الخصومات والأرباح", perm: "manage_products",
+      children: [
+        { section: "pricing_discounts", label: "🏷️ قواعد الخصم", perm: "manage_products" },
+        { section: "pricing_bulk", label: "📈 الربح بالجملة", perm: "manage_products" },
+        { section: "pricing_ranks", label: "🏅 الرتب", perm: "manage_rewards" },
       ],
     },
     {
@@ -1373,6 +1385,7 @@ async function renderStoreEditPriceListPage(bot: TelegramBot, chatId: number, pa
 async function renderStorePaymentMethodsMenu(bot: TelegramBot, chatId: number, messageId?: number) {
   const breadcrumb = `${ADMIN_MENU_TREE.label} ← 🏪 المتجر ← 💳 طرق الدفع`;
   const keyboard: any[][] = [
+    [{ text: "🔧 خيارات الدفع (توثيق الهوية / QR)", callback_data: "x:pmf:list:0" }],
     [{ text: "🗑️ حذف طريقة دفع", callback_data: buildCallbackData("store_del_pm", "open", "-", "0") }],
     BACK_HOME_ROW,
   ];
@@ -1398,6 +1411,7 @@ async function renderSettingsStoreMenu(bot: TelegramBot, chatId: number, message
   const breadcrumb = `${ADMIN_MENU_TREE.label} ← ⚙️ إعدادات المتجر`;
   const keyboard: any[][] = [
     [{ text: "🔧 إعدادات أخرى (تقنية/بوتات/AI)", callback_data: buildCallbackData("settings_other", "open") }],
+    [{ text: "📢 الشريط المتحرك (الصفحة الرئيسية)", callback_data: "x:mqe:open" }],
     [{ text: "📜 سجل النشاطات", callback_data: "menu:settings_activity_log:open:-:0" }],
     BACK_HOME_ROW,
   ];
@@ -1822,7 +1836,7 @@ async function sendMainMenu(chatId: number, user: any, bot: TelegramBot) {
   const { data: setting } = await supabase.from("settings").select("value").eq("key", "support_whatsapp").single();
   const whatsappLink = setting ? `https://wa.me/${setting.value.replace("+", "")}` : "https://t.me/your_support_username";
 
-  bot.sendMessage(chatId, `أهلاً بك ${user.name} في القائمة الرئيسية:`, {
+  bot.sendMessage(chatId, `أهلاً بك ${user.name}${userExtras.verifiedMark(user)} في القائمة الرئيسية:`, {
     reply_markup: {
       keyboard: [
         [{ text: "📄 سياسة الخصوصية" }, { text: "💬 الدعم الفني" }],
@@ -1834,10 +1848,14 @@ async function sendMainMenu(chatId: number, user: any, bot: TelegramBot) {
 
   // [نظام تنقّل ذكي] هذه رسالة اللوحة الرئيسية القابلة للتعديل لاحقاً — تُرسل دائماً كرسالة
   // جديدة هنا (بداية جلسة/عودة للرئيسية)، وتُسجَّل كلوحة نشطة حتى تُعدَّل عند التنقل بعدها.
-  const sentPanel = await bot.sendMessage(chatId, "الخيارات المتاحة:", {
+  // [PHASE-BOTS] الشريط النصي المتحرك (إن فعّله الأدمن) + صف الرتبة/التوثيق — كالموقع
+  const marquee = await userExtras.marqueeLine();
+  const extraRows = await userExtras.mainMenuRows(user);
+  const sentPanel = await bot.sendMessage(chatId, `${marquee}الخيارات المتاحة:`, {
     reply_markup: {
       inline_keyboard: [
         [{ text: "👤 معلوماتي", callback_data: "my_info" }, { text: "💰 رصيدي", callback_data: "my_balance" }],
+        ...extraRows,
         [{ text: "💳 دفعاتي", callback_data: "my_payments" }, { text: "📦 طلباتي", callback_data: "my_orders" }],
         [{ text: "🚀 شحن التطبيقات", callback_data: "charge_apps" }],
         [{ text: "💳 شحن الرصيد", callback_data: "topup_balance" }],
@@ -1871,6 +1889,56 @@ function computeOrderNetProfit(product: any, total: number, qty: number, costPer
 // محرك القواعد نفسه + حماية التكلفة — لتكون أسعار البوت مطابقة تماماً لأسعار الموقع.
 // ============================================================
 const { botDiscountPercent, botFinalPrice } = createBotPricing(supabase);
+const storeCore = createStoreCore(supabase);
+
+// إشعار المستخدم (تيليجرام) بنتيجة طلب توثيق الهوية — يُستدعى من الموقع ومن بوت الأدمن معاً
+async function notifyIdentityResult(userId: number | string, approved: boolean, reason?: string) {
+  const { data: u } = await supabase.from("users").select("telegram_chat_id").eq("id", userId).maybeSingle();
+  if (!u?.telegram_chat_id || !userBot) return;
+  const text = approved
+    ? "✅ تم توثيق هويتك بنجاح! ستظهر علامة التوثيق الزرقاء بجانب اسمك."
+    : `❌ تم رفض طلب توثيق الهوية.\nالسبب: ${reason || "—"}\n\nيمكنك إرسال طلب جديد بصور أوضح من «🛡️ توثيق الهوية».`;
+  try { await userBot.sendMessage(u.telegram_chat_id, text); } catch {}
+}
+
+// [PHASE-BOTS] ميزات بوت المستخدمين الجديدة (توثيق الهوية، الرتب، QR، الشريط، علامة ✅)
+const userExtras = createUserExtras({ supabase, storeCore, getBot: () => userBot, states: userStates });
+
+// [PHASE-BOTS] مراقب طلبات توثيق الهوية الجديدة: يُبلغ أدمن البوت بأي طلب جديد (من الموقع أو من بوت المستخدمين)
+// دون تكرار. يعمل كل دقيقة؛ المعرّف الأخير في الذاكرة يبدأ من آخر طلب موجود عند التشغيل (لا إشعارات قديمة).
+let identityWatcherLastId: number | null = null;
+let identityWatcherTimer: any = null;
+async function identityWatcherTick() {
+  try {
+    if (identityWatcherLastId === null) {
+      const { data: mx } = await supabase.from("identity_verifications").select("id").order("id", { ascending: false }).limit(1).maybeSingle();
+      identityWatcherLastId = Number(mx?.id) || 0;
+      return;
+    }
+    const { data: fresh } = await supabase.from("identity_verifications")
+      .select("id, user_id, created_at").eq("status", "pending").gt("id", identityWatcherLastId).order("id", { ascending: true }).limit(20);
+    for (const r of fresh || []) {
+      identityWatcherLastId = Math.max(identityWatcherLastId, Number(r.id));
+      const { data: u } = await supabase.from("users").select("name").eq("id", r.user_id).maybeSingle();
+      notifyAdmins("topup_transactions",
+        `🛡️ طلب توثيق هوية جديد #${r.id}\n\n👤 ${u?.name || "مستخدم"} (#${r.user_id})\n🗓️ ${new Date(r.created_at).toLocaleString("ar-EG")}`,
+        { reply_markup: { inline_keyboard: [[{ text: "🛡️ مراجعة الطلب", callback_data: `x:idn:view:${r.id}:pending` }]] } });
+    }
+  } catch (e) { console.error("[IDENTITY WATCHER]", e); }
+}
+if (!identityWatcherTimer) identityWatcherTimer = setInterval(identityWatcherTick, 60000);
+
+// [PHASE-BOTS] ميزات بوت الأدمن الجديدة (توثيق، خصومات، ربح بالجملة، رتب، خيارات الدفع، الشريط)
+const adminExtras = createAdminExtras({
+  supabase, storeCore,
+  getBot: () => adminBot,
+  sendOrEdit,
+  hasPerm: adminHasPermission,
+  states: userStates,
+  notifyIdentityResult,
+  uploadImage: (buf: ArrayBuffer) => uploadBufferToImgbb(buf),
+  adminLabel: (id) => `bot:${getAdminEntry(id)?.label || id}`,
+});
 
 // ربط حساب بمحادثة تيليجرام: يفكّ ارتباط أي حساب آخر بنفس المحادثة (وإلا تفشل كل استعلامات .single() لاحقاً)
 async function bindTelegramChat(userId: number | string, chatId: number) {
@@ -1989,7 +2057,7 @@ async function processBotOrder(chatId: number, user: any, product: any, price: n
     const adminMsg = [
       `🔔 طلب جديد من البوت #ORD${order.id}`,
       "",
-      `👤 العميل: ${user.name}`,
+      `👤 العميل: ${user.name}${userExtras.verifiedMark(user)}`,
       `🔢 رقم الدخول: #${user.id}`,
       `📦 المنتج: ${product.name} (#${product.id})`,
       `💵 الإجمالي: ${price}`,
@@ -10810,57 +10878,30 @@ ${userContext}
   // ═══════════════════════════════════════════════════════════════════════════
   // [PHASE-3] توثيق الهوية — إدارة الطلبات (الصور في مخزن خاص، تُبثّ عبر السيرفر للأدمن فقط)
   // ═══════════════════════════════════════════════════════════════════════════
-  const IDENTITY_BUCKET = "identity-docs";
+  // [PHASE-BOTS] المنطق في storeCore.ts (مشترك مع بوت الأدمن) — المسارات هنا غلاف رقيق فقط
+  const coreFail = (res: any, e: any, req: any) => {
+    if (e instanceof CoreError) return res.status(e.status).json({ error: e.message });
+    return safeError(res, e, undefined, req);
+  };
 
   app.get("/api/admin/identity/settings", async (req, res) => {
-    try {
-      const { data } = await supabase.from("settings").select("key,value").in("key", ["identity_verification_enabled", "identity_verification_description"]);
-      const m: Record<string, string> = {};
-      (data || []).forEach((r: any) => { m[r.key] = r.value; });
-      res.json({ enabled: m.identity_verification_enabled === "true", description: m.identity_verification_description || "" });
-    } catch (e: any) { safeError(res, e, undefined, req); }
+    try { res.json(await storeCore.getIdentitySettings()); } catch (e: any) { coreFail(res, e, req); }
   });
 
   app.put("/api/admin/identity/settings", async (req, res) => {
     try {
-      const rows: { key: string; value: string }[] = [];
-      if (req.body?.enabled !== undefined) rows.push({ key: "identity_verification_enabled", value: req.body.enabled ? "true" : "false" });
-      if (req.body?.description !== undefined) {
-        if (typeof req.body.description !== "string") return res.status(400).json({ error: "الوصف غير صحيح" });
-        rows.push({ key: "identity_verification_description", value: req.body.description.slice(0, 3000) });
-      }
-      if (rows.length === 0) return res.status(400).json({ error: "لا توجد حقول للتعديل" });
-      const { error } = await supabase.from("settings").upsert(rows, { onConflict: "key" });
-      if (error) throw error;
+      await storeCore.setIdentitySettings({ enabled: req.body?.enabled === undefined ? undefined : !!req.body.enabled, description: req.body?.description });
       logAdminActivity({ action_type: "identity_settings_updated", target_model: "settings", target_id: "identity", details: "تحديث إعدادات توثيق الهوية", req }).catch(() => {});
       res.json({ success: true });
-    } catch (e: any) { safeError(res, e, undefined, req); }
+    } catch (e: any) { coreFail(res, e, req); }
   });
 
   app.get("/api/admin/identity/pending-count", async (req, res) => {
-    try {
-      const { count, error } = await supabase.from("identity_verifications").select("id", { count: "exact", head: true }).eq("status", "pending");
-      if (error) throw error;
-      res.json({ count: count || 0 });
-    } catch (e: any) { safeError(res, e, undefined, req); }
+    try { res.json({ count: await storeCore.identityPendingCount() }); } catch (e: any) { coreFail(res, e, req); }
   });
 
   app.get("/api/admin/identity/requests", async (req, res) => {
-    try {
-      const status = String(req.query.status || "pending");
-      let q = supabase.from("identity_verifications").select("id, user_id, status, reject_reason, reviewed_by, reviewed_at, created_at").order("created_at", { ascending: false }).limit(100);
-      if (["pending", "approved", "rejected"].includes(status)) q = q.eq("status", status);
-      const { data, error } = await q;
-      if (error) throw error;
-      const rows = data || [];
-      const ids = [...new Set(rows.map((r: any) => r.user_id))];
-      const users: Record<string, any> = {};
-      if (ids.length) {
-        const { data: us } = await supabase.from("users").select("id, name, email, phone, identity_verified").in("id", ids);
-        (us || []).forEach((u: any) => { users[String(u.id)] = u; });
-      }
-      res.json(rows.map((r: any) => ({ ...r, user: users[String(r.user_id)] || null })));
-    } catch (e: any) { safeError(res, e, undefined, req); }
+    try { res.json(await storeCore.listIdentityRequests(String(req.query.status || "pending"))); } catch (e: any) { coreFail(res, e, req); }
   });
 
   app.get("/api/admin/identity/requests/:id/image/:side", async (req, res) => {
@@ -10868,46 +10909,33 @@ ${userContext}
       if (!isValidId(req.params.id)) return res.status(400).json({ error: "معرف غير صحيح" });
       const side = req.params.side;
       if (side !== "front" && side !== "back") return res.status(400).json({ error: "جهة غير صحيحة" });
-      const { data: row } = await supabase.from("identity_verifications").select("front_path, back_path").eq("id", req.params.id).maybeSingle();
-      if (!row) return res.status(404).json({ error: "الطلب غير موجود" });
-      const { data: blob, error } = await supabase.storage.from(IDENTITY_BUCKET).download(side === "front" ? row.front_path : row.back_path);
-      if (error || !blob) return res.status(404).json({ error: "الصورة غير موجودة" });
-      const buf = Buffer.from(await blob.arrayBuffer());
-      res.setHeader("Content-Type", blob.type || "image/jpeg");
+      const img = await storeCore.downloadIdentityImage(req.params.id, side);
+      if (!img) return res.status(404).json({ error: "الصورة غير موجودة" });
+      res.setHeader("Content-Type", img.mime);
       res.setHeader("Cache-Control", "private, no-store");
       res.setHeader("X-Content-Type-Options", "nosniff");
-      res.send(buf);
-    } catch (e: any) { safeError(res, e, undefined, req); }
+      res.send(img.buf);
+    } catch (e: any) { coreFail(res, e, req); }
   });
 
   app.post("/api/admin/identity/requests/:id/approve", async (req, res) => {
     try {
       if (!isValidId(req.params.id)) return res.status(400).json({ error: "معرف غير صحيح" });
-      const { data: upd, error } = await supabase.from("identity_verifications")
-        .update({ status: "approved", reject_reason: null, reviewed_by: adminIdentity(req), reviewed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-        .eq("id", req.params.id).eq("status", "pending").select("user_id").maybeSingle();
-      if (error) throw error;
-      if (!upd) return res.status(409).json({ error: "الطلب غير موجود أو تمت مراجعته مسبقاً" });
-      const { error: uErr } = await supabase.from("users").update({ identity_verified: true }).eq("id", upd.user_id);
-      if (uErr) throw uErr;
-      logAdminActivity({ action_type: "identity_approved", target_model: "identity_verifications", target_id: String(req.params.id), details: `قبول توثيق هوية المستخدم #${upd.user_id}`, req }).catch(() => {});
+      const r = await storeCore.approveIdentity(req.params.id, adminIdentity(req));
+      notifyIdentityResult(r.userId, true).catch(() => {});
+      logAdminActivity({ action_type: "identity_approved", target_model: "identity_verifications", target_id: String(req.params.id), details: `قبول توثيق هوية المستخدم #${r.userId}`, req }).catch(() => {});
       res.json({ success: true });
-    } catch (e: any) { safeError(res, e, undefined, req); }
+    } catch (e: any) { coreFail(res, e, req); }
   });
 
   app.post("/api/admin/identity/requests/:id/reject", async (req, res) => {
     try {
       if (!isValidId(req.params.id)) return res.status(400).json({ error: "معرف غير صحيح" });
-      const reason = String(req.body?.reason || "").trim().slice(0, 300);
-      if (reason.length < 3) return res.status(400).json({ error: "سبب الرفض مطلوب" });
-      const { data: upd, error } = await supabase.from("identity_verifications")
-        .update({ status: "rejected", reject_reason: reason, reviewed_by: adminIdentity(req), reviewed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-        .eq("id", req.params.id).eq("status", "pending").select("user_id").maybeSingle();
-      if (error) throw error;
-      if (!upd) return res.status(409).json({ error: "الطلب غير موجود أو تمت مراجعته مسبقاً" });
-      logAdminActivity({ action_type: "identity_rejected", target_model: "identity_verifications", target_id: String(req.params.id), details: `رفض توثيق هوية المستخدم #${upd.user_id}: ${reason}`, req }).catch(() => {});
+      const r = await storeCore.rejectIdentity(req.params.id, String(req.body?.reason || ""), adminIdentity(req));
+      notifyIdentityResult(r.userId, false, r.reason).catch(() => {});
+      logAdminActivity({ action_type: "identity_rejected", target_model: "identity_verifications", target_id: String(req.params.id), details: `رفض توثيق هوية المستخدم #${r.userId}: ${r.reason}`, req }).catch(() => {});
       res.json({ success: true });
-    } catch (e: any) { safeError(res, e, undefined, req); }
+    } catch (e: any) { coreFail(res, e, req); }
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -10980,54 +11008,10 @@ ${userContext}
         if (!isValidId(req.body?.owner_id)) return res.status(400).json({ error: "معرف الرتبة غير صحيح" });
         ownerId = Number(req.body.owner_id);
       }
-      let clean: ReturnType<typeof sanitizeRulesInput>;
-      try { clean = sanitizeRulesInput(req.body?.items); } catch (err: any) { return res.status(400).json({ error: err.message }); }
-
-      const oldRules = await loadDiscountRules(supabase, ownerType as any, ownerId);
-      let del = supabase.from("discount_rules").delete().eq("owner_type", ownerType);
-      del = ownerId === null ? del.is("owner_id", null) : del.eq("owner_id", ownerId);
-      const { error: delErr } = await del;
-      if (delErr) throw delErr;
-      if (clean.length > 0) {
-        const { error: insErr } = await supabase.from("discount_rules").insert(
-          clean.map(r => ({ owner_type: ownerType, owner_id: ownerId, scope_type: r.scope_type, scope_id: r.scope_id, percent: r.percent }))
-        );
-        if (insErr) {
-          // استرجاع القواعد القديمة كي لا يبقى المالك بلا قواعد عند فشل الإدراج
-          if (oldRules.length > 0) {
-            await supabase.from("discount_rules").insert(oldRules.map(r => ({ owner_type: ownerType, owner_id: ownerId, scope_type: r.scope_type, scope_id: r.scope_id, percent: r.percent })));
-          }
-          throw insErr;
-        }
-      }
-
-      // مزامنة قيم العرض القديمة (شارة الرتبة، إعدادات VIP والـ API) مع أعلى نسبة/قاعدة "الكل"
-      const maxPct = clean.reduce((m, r) => Math.max(m, r.percent), 0);
-      const allPct = clean.find(r => r.scope_type === "all")?.percent ?? 0;
-      try {
-        if (ownerType === "rank") await supabase.from("ranks").update({ discount_percent: maxPct }).eq("id", ownerId);
-        else if (ownerType === "vip") await supabase.from("settings").upsert({ key: "vip_discount", value: String(maxPct) }, { onConflict: "key" });
-        else if (ownerType === "api_global") await supabase.from("settings").upsert({ key: "public_api_discount_percent", value: String(allPct) }, { onConflict: "key" });
-      } catch { /* مزامنة اختيارية */ }
-
-      // تحذير الخسارة: منتجات تتجاوز نسبتها الفعلية ما يُبقي السعر فوق التكلفة (ستُقصّ تلقائياً عند الشراء)
-      const warnings: any[] = [];
-      let warnCount = 0;
-      if (clean.some(r => r.percent > 0)) {
-        const products = await fetchProductsForScopes(clean.some(r => r.scope_type === "all") ? [{ scope_type: "all", scope_id: null }] : clean.map(r => ({ scope_type: r.scope_type, scope_id: r.scope_id })));
-        const ruleObjs = clean.map(r => ({ owner_type: ownerType as any, owner_id: ownerId, scope_type: r.scope_type, scope_id: r.scope_id, percent: r.percent }));
-        for (const p of products) {
-          const r = resolveDiscountPercent(ruleObjs, p);
-          if (r.capped) {
-            warnCount++;
-            if (warnings.length < 15) warnings.push({ id: p.id, name: p.name, requested: r.rule?.percent, max_allowed: r.cap });
-          }
-        }
-      }
-      logAdminActivity({ action_type: "discount_rules_updated", target_model: "discount_rules", target_id: `${ownerType}:${ownerId ?? "-"}`, details: `تحديث قواعد الخصم (${ownerType}${ownerId ? " #" + ownerId : ""}) — ${clean.length} قاعدة`, req }).catch(() => {});
-      const savedRules = await loadDiscountRules(supabase, ownerType as any, ownerId);
-      res.json({ success: true, rules: savedRules, product_names: await discountProductNames(savedRules), warning_count: warnCount, warnings });
-    } catch (e: any) { safeError(res, e, undefined, req); }
+      const r = await storeCore.saveDiscountRules(ownerType as any, ownerId, req.body?.items);
+      logAdminActivity({ action_type: "discount_rules_updated", target_model: "discount_rules", target_id: `${ownerType}:${ownerId ?? "-"}`, details: `تحديث قواعد الخصم (${ownerType}${ownerId ? " #" + ownerId : ""}) — ${r.rules.length} قاعدة`, req }).catch(() => {});
+      res.json({ success: true, ...r });
+    } catch (e: any) { coreFail(res, e, req); }
   });
 
   // شجرة الأقسام لواجهة اختيار النطاق (المنتجات تُبحث عبر discount-scope-search لكثرتها)
@@ -11052,67 +11036,17 @@ ${userContext}
     } catch (e: any) { safeError(res, e, undefined, req); }
   });
 
-  // ─── تعديل نسبة الربح بالجملة (معاينة ثم تأكيد) — منتجات external_api فقط (لها أساس تكلفة) ───
-  function computeBulkProfitChange(p: any, op: string, type: string, value: number) {
-    const base = parseFloat(String(p.price_per_unit)) || 0;
-    if (p.store_type !== "external_api" || !(base > 0)) return null;
-    const oldPrice = parseFloat(String(p.price)) || 0;
-    const current = type === "fixed" ? oldPrice - base : (oldPrice / base - 1) * 100;
-    let m = op === "set" ? value : op === "increase" ? current + value : current - value;
-    m = Math.max(0, m);
-    const newPrice = type === "fixed" ? +(base + m).toFixed(6) : +(base * (1 + m / 100)).toFixed(6);
-    return { base, oldPrice, newPrice, newMarkup: +m.toFixed(6) };
-  }
-  function parseBulkProfitBody(body: any) {
-    const op = ["set", "increase", "decrease"].includes(body?.op) ? body.op : "";
-    const type = body?.markup_type === "fixed" ? "fixed" : "percent";
-    const value = Number(body?.value);
-    if (!op) throw new Error("نوع العملية غير صحيح");
-    if (!Number.isFinite(value) || value < 0 || value > 100000) throw new Error("القيمة غير صحيحة");
-    const rawScopes = Array.isArray(body?.scopes) ? body.scopes : [];
-    if (rawScopes.length === 0) throw new Error("يرجى اختيار نطاق واحد على الأقل");
-    const scopes = sanitizeRulesInput(rawScopes.map((s: any) => ({ scope_type: s?.scope_type, scope_id: s?.scope_id, percent: 0 })));
-    return { op, type, value, scopes: scopes.map(s => ({ scope_type: s.scope_type, scope_id: s.scope_id })) };
-  }
-
+  // ─── تعديل نسبة الربح بالجملة (معاينة ثم تأكيد) — المنطق في storeCore.ts ───
   app.post("/api/admin/products/bulk-profit/preview", adminAuth, async (req, res) => {
-    try {
-      let parsed; try { parsed = parseBulkProfitBody(req.body); } catch (err: any) { return res.status(400).json({ error: err.message }); }
-      const products = await fetchProductsForScopes(parsed.scopes);
-      const changes: any[] = [];
-      for (const p of products) {
-        const c = computeBulkProfitChange(p, parsed.op, parsed.type, parsed.value);
-        if (c) changes.push({ id: p.id, name: p.name, ...c });
-      }
-      const step = Math.max(1, Math.floor(changes.length / 8));
-      const samples = changes.filter((_, i) => i % step === 0).slice(0, 8).map(c => ({ id: c.id, name: c.name, old_price: c.oldPrice, new_price: c.newPrice }));
-      res.json({ total_in_scope: products.length, affected: changes.length, skipped: products.length - changes.length, samples });
-    } catch (e: any) { safeError(res, e, undefined, req); }
+    try { res.json(await storeCore.bulkProfitPreview(req.body)); } catch (e: any) { coreFail(res, e, req); }
   });
 
   app.post("/api/admin/products/bulk-profit/apply", adminAuth, async (req, res) => {
     try {
-      let parsed; try { parsed = parseBulkProfitBody(req.body); } catch (err: any) { return res.status(400).json({ error: err.message }); }
-      const products = await fetchProductsForScopes(parsed.scopes);
-      const changes: { id: any; newPrice: number; newMarkup: number }[] = [];
-      for (const p of products) {
-        const c = computeBulkProfitChange(p, parsed.op, parsed.type, parsed.value);
-        if (c) changes.push({ id: p.id, newPrice: c.newPrice, newMarkup: c.newMarkup });
-      }
-      // حماية: يجب أن يطابق عدد المنتجات المتأثرة ما رآه الأدمن في المعاينة
-      if (req.body?.expected_count !== undefined && Number(req.body.expected_count) !== changes.length) {
-        return res.status(409).json({ error: "تغيّرت المنتجات منذ المعاينة، أعد المعاينة ثم أكّد" });
-      }
-      let updated = 0;
-      for (let i = 0; i < changes.length; i += 25) {
-        const results = await Promise.all(changes.slice(i, i + 25).map(c =>
-          supabase.from("products").update({ markup_type: parsed.type, markup_value: c.newMarkup, price: c.newPrice }).eq("id", c.id)
-        ));
-        updated += results.filter(r => !r.error).length;
-      }
-      logAdminActivity({ action_type: "products_bulk_profit", target_model: "products", target_id: "bulk", details: `تعديل نسبة الربح (${parsed.op} ${parsed.type}=${parsed.value}) على ${updated} منتج`, req }).catch(() => {});
-      res.json({ success: true, updated, failed: changes.length - updated });
-    } catch (e: any) { safeError(res, e, undefined, req); }
+      const r = await storeCore.bulkProfitApply(req.body, req.body?.expected_count);
+      logAdminActivity({ action_type: "products_bulk_profit", target_model: "products", target_id: "bulk", details: `تعديل نسبة الربح (${r.op} ${r.type}=${r.value}) على ${r.updated} منتج`, req }).catch(() => {});
+      res.json({ success: true, updated: r.updated, failed: r.failed });
+    } catch (e: any) { coreFail(res, e, req); }
   });
 
   app.post("/api/admin/ranks/recalc", async (req, res) => {
@@ -16318,6 +16252,12 @@ async function startBots(isHotRestart: boolean = false) {
         try {
           const data = query.data;
 
+        // [PHASE-BOTS] ميزات الموقع الجديدة (بادئة x:) — توثيق/خصومات/ربح/رتب/خيارات الدفع/الشريط
+        if (data?.startsWith("x:")) {
+          await adminExtras.handleCallback(query);
+          return;
+        }
+
         // --- محرك التنقل عبر Inline Keyboard: "menu:section:action:id:page" ---
         if (
           data?.startsWith("menu:") &&
@@ -16335,6 +16275,14 @@ async function startBots(isHotRestart: boolean = false) {
               await renderAdminMenu(adminBot!, chatId, newPath, query.message?.message_id);
             } else if (section === "__home__") {
               await renderAdminMenu(adminBot!, chatId, ["root"], query.message?.message_id);
+            } else if ((section === "identity" || section === "pricing_discounts" || section === "pricing_bulk" || section === "pricing_ranks") && action === "open") {
+              const needPerm = section === "identity" ? "manual_topup" : section === "pricing_ranks" ? "manage_rewards" : "manage_products";
+              if (!adminHasPermission(chatId, needPerm)) {
+                try { await adminBot!.answerCallbackQuery(query.id, { text: "⛔ لا تملك صلاحية هذا القسم", show_alert: true }); } catch {}
+                return;
+              }
+              adminNavStack.set(chatId, section === "identity" ? ["root", "users", section] : ["root", "pricing", section]);
+              await adminExtras.openSection(section, chatId, query.message?.message_id);
             } else if (section === "orders" && action === "open") {
               // فتح قسم الطلبات مباشرة على فلتر "قيد الانتظار" افتراضياً
               adminNavStack.set(chatId, ["root", "orders"]);
@@ -17269,6 +17217,9 @@ async function startBots(isHotRestart: boolean = false) {
         const state = userStates.get(chatId);
         if (!state) return;
 
+        // [PHASE-BOTS] حالات إدخال ميزات الموقع الجديدة (x_*)
+        if (await adminExtras.handleMessage(msg, state)) return;
+
         if (state.step === "admin_broadcast_msg") {
           await supabase.from("notifications").insert({ title: "إعلان جديد", message: text, type: "info" });
           sendPushNotification(null, "إعلان جديد", text);
@@ -17928,7 +17879,7 @@ async function startBots(isHotRestart: boolean = false) {
         return;
       }
 
-      let text = `📦 طلباتي — صفحة ${safePage} من ${totalPages}\n\n`;
+      let text = `${await userExtras.nameLine(userId)}📦 طلباتي — صفحة ${safePage} من ${totalPages}\n\n`;
       const keyboard: any[] = [filterRow];
 
       pageOrders.forEach((o: any) => {
@@ -18064,7 +18015,7 @@ async function startBots(isHotRestart: boolean = false) {
         return;
       }
 
-      let text = `💳 دفعاتي — صفحة ${safePage} من ${totalPages}\n\n`;
+      let text = `${await userExtras.nameLine(userId)}💳 دفعاتي — صفحة ${safePage} من ${totalPages}\n\n`;
       const keyboard: any[] = [filterRow];
 
       pageTxs.forEach((t: any) => {
@@ -18340,6 +18291,14 @@ async function startBots(isHotRestart: boolean = false) {
         userBot!.sendMessage(chatId, "🔚 تم إنهاء المحادثة مع الدعم الفني.");
         if (user) sendMainMenu(chatId, user, userBot!);
 
+      } else if (data === "my_rank" || data === "idv_home" || data === "idv_start" || data === "idv_cancel") {
+        const u = await userExtras.userByChat(chatId);
+        if (!u) return userBot!.sendMessage(chatId, "يرجى تسجيل الدخول أولاً.");
+        if (data === "my_rank") await userExtras.rankPage(chatId, u);
+        else if (data === "idv_home") await userExtras.identityHome(chatId, u);
+        else if (data === "idv_start") await userExtras.identityStart(chatId, u);
+        else { userStates.delete(chatId); userBot!.sendMessage(chatId, "تم إلغاء طلب التوثيق."); }
+
       } else if (data === "my_info") {
         const { data: user } = await supabase.from("users").select("*").eq("telegram_chat_id", chatId).single();
         if (!user) return userBot!.sendMessage(chatId, "يرجى تسجيل الدخول أولاً.");
@@ -18357,11 +18316,16 @@ async function startBots(isHotRestart: boolean = false) {
         };
 
         let text = `👤 معلوماتي:\n\n`;
-        text += `📝 الاسم: ${user.name || "—"}\n`;
+        text += `📝 الاسم: ${user.name || "—"}${userExtras.verifiedMark(user)}\n`;
         text += `📧 البريد: ${user.email || "—"}\n`;
         text += `🆔 رقم الدخول: #${user.id}\n`;
         if (user.phone) text += `📱 الهاتف: ${user.phone}\n`;
         text += `${user.is_vip ? "💎 الحالة: VIP" : "🔰 الحالة: عادي"}\n`;
+        text += `🛡️ التوثيق: ${user.identity_verified ? "موثّق ✅" : "غير موثّق"}\n`;
+        if (user.rank_id) {
+          const { data: rk } = await supabase.from("ranks").select("name").eq("id", user.rank_id).maybeSingle();
+          if (rk?.name) text += `🏅 الرتبة: ${rk.name}\n`;
+        }
         if (stats?.profile_badge) text += `🏅 الشارة: ${badgeMap[stats.profile_badge] || ""} ${stats.profile_badge}\n`;
         if (stats?.user_title) text += `🎖️ اللقب: ${stats.user_title}\n`;
         text += `\n📊 الإحصائيات:\n`;
@@ -18672,20 +18636,31 @@ async function startBots(isHotRestart: boolean = false) {
         userBot!.sendMessage(chatId, "👋 تم تسجيل الخروج بنجاح. يمكنك العودة في أي وقت!");
 
       } else if (data === "topup_balance") {
-        const { data: user } = await supabase.from("users").select("id").eq("telegram_chat_id", chatId).single();
+        const { data: user } = await supabase.from("users").select("id, identity_verified, is_banned, blocked_until, is_blocked").eq("telegram_chat_id", chatId).single();
         if (!user) return userBot!.sendMessage(chatId, "يرجى تسجيل الدخول أولاً.");
+        { const banT = await checkAndClearBan(user); if (banT.banned || user.is_blocked) return userBot!.sendMessage(chatId, `❌ ${banT.message || "حسابك موقوف. تواصل مع الدعم."}`); }
 
         const { data: pending } = await supabase.from("transactions").select("id").eq("user_id", user.id).eq("status", "pending");
         if ((pending?.length || 0) >= 2) return userBot!.sendMessage(chatId, "⚠️ لا يمكنك إرسال أكثر من مدفوعتين قيد المراجعة.");
 
         const { data: methods } = await supabase.from("payment_methods").select("*").eq("active", true);
         if (!methods || methods.length === 0) return userBot!.sendMessage(chatId, "لا توجد طرق دفع متاحة حالياً.");
-        const keyboard = methods.map((m: any) => [{ text: m.name, callback_data: `topup_method_${m.id}` }]);
+        const keyboard = methods.map((m: any) => [{ text: userExtras.methodLabel(m, user), callback_data: `topup_method_${m.id}` }]);
         userBot!.sendMessage(chatId, "اختر طريقة الدفع:", { reply_markup: { inline_keyboard: keyboard } });
 
       } else if (data?.startsWith("topup_method_")) {
         const methodId = data.split("_")[2];
         const { data: method } = await supabase.from("payment_methods").select("*").eq("id", methodId).single();
+        if (!method || method.active === false) return userBot!.sendMessage(chatId, "❌ طريقة الدفع هذه غير متاحة حالياً.");
+        // [PHASE-BOTS] اشتراط توثيق الهوية (تحقق السيرفر) — كالموقع تماماً
+        {
+          const { data: tuser } = await supabase.from("users").select("id").eq("telegram_chat_id", chatId).single();
+          if (!tuser) return userBot!.sendMessage(chatId, "يرجى تسجيل الدخول أولاً.");
+          const gateMsg = await userExtras.identityGate(tuser.id, methodId);
+          if (gateMsg) {
+            return userBot!.sendMessage(chatId, `🔒 ${gateMsg}`, { reply_markup: { inline_keyboard: [[{ text: "🛡️ الانتقال إلى توثيق الهوية", callback_data: "idv_home" }]] } });
+          }
+        }
         let extraFields: Array<{ id: string; label: string; required: boolean }> = [];
         try {
           const parsedPmFields = typeof method?.custom_fields === "string" ? JSON.parse(method.custom_fields) : method?.custom_fields;
@@ -18695,7 +18670,9 @@ async function startBots(isHotRestart: boolean = false) {
         }
         const isAutoMethod = method?.method_type === "syriatel" || method?.method_type === "shamcash" || method?.method_type === "binance";
         userStates.set(chatId, { step: "topup_amount", data: { methodId, extraFields, isAutoMethod } });
-        userBot!.sendMessage(chatId, `💳 طريقة الدفع: ${method?.name}\nالعنوان: ${method?.wallet_address}\nالحد الأدنى: ${method?.min_amount} $\n\n${method?.instructions || ""}\n\nيرجى إدخال المبلغ المراد شحنه ($):`);
+        const bonusTxt = userExtras.bonusLine(method);
+        await userBot!.sendMessage(chatId, `💳 طريقة الدفع: ${method?.name}\nالعنوان: ${method?.wallet_address}\nالحد الأدنى: ${method?.min_amount} $${bonusTxt ? `\n${bonusTxt}` : ""}\n\n${method?.instructions || ""}\n\nيرجى إدخال المبلغ المراد شحنه ($):`);
+        await userExtras.sendMethodQr(chatId, method); // [PHASE-BOTS] QR: توليد تلقائي أو صورة جاهزة
 
       } else if (data === "charge_apps") {
         const { data: categories } = await supabase.from("categories").select("*").eq("active", true).order("order_index");
@@ -18955,6 +18932,9 @@ async function startBots(isHotRestart: boolean = false) {
         }
       }
 
+      // [PHASE-BOTS] صور توثيق الهوية (حالات idv_*)
+      if (photo && await userExtras.handlePhoto(msg)) return;
+
       // Photo: avatar upload
       if (photo) {
         const avatarState = userStates.get(chatId);
@@ -18994,6 +18974,10 @@ async function startBots(isHotRestart: boolean = false) {
             const buffer = await fileRes.arrayBuffer();
             const receiptUrl = await uploadBufferToImgbb(buffer);
             const { data: method } = await supabase.from("payment_methods").select("name").eq("id", state.data.methodId).single();
+            {
+              const gateRc = await userExtras.identityGate(user.id, state.data.methodId);
+              if (gateRc) { userStates.delete(chatId); return void userBot!.sendMessage(chatId, `🔒 ${gateRc}`); }
+            }
 
             const extraFields: Array<{ id: string; label: string; required: boolean }> = state.data.extraFields || [];
             const fieldValues: Record<string, string> = state.data.fieldValues || {};
@@ -19018,7 +19002,7 @@ async function startBots(isHotRestart: boolean = false) {
               const adminMsg = [
                 `💰 طلب شحن جديد #TX${tx.id}`,
                 "",
-                `👤 المستخدم: ${user.name}`,
+                `👤 المستخدم: ${user.name}${userExtras.verifiedMark(user)}`,
                 `🔢 رقم الدخول: #${user.id}`,
                 `💵 المبلغ: ${state.data.amount}$`,
                 `💳 طريقة الدفع: ${method?.name}`,
@@ -19112,6 +19096,7 @@ async function startBots(isHotRestart: boolean = false) {
 
       const state = userStates.get(chatId);
       if (!state) return;
+      if (await userExtras.handleText(msg, state)) return; // [PHASE-BOTS] نص أثناء طلب التوثيق
 
       if (state.step === "edit_profile_name") {
         if (text.trim() !== "-") state.data.name = text.trim();
@@ -19159,7 +19144,12 @@ async function startBots(isHotRestart: boolean = false) {
 
       } else if (state.step === "topup_amount") {
         const amount = parseFloat(text);
-        if (isNaN(amount) || amount <= 0) return userBot!.sendMessage(chatId, "❌ يرجى إدخال مبلغ صحيح:");
+        if (isNaN(amount) || amount <= 0 || amount > 100000) return userBot!.sendMessage(chatId, "❌ يرجى إدخال مبلغ صحيح:");
+        {
+          const { data: pmMin } = await supabase.from("payment_methods").select("min_amount").eq("id", state.data.methodId).maybeSingle();
+          const minAmt = Number(pmMin?.min_amount) || 0;
+          if (minAmt > 0 && amount < minAmt) return userBot!.sendMessage(chatId, `❌ الحد الأدنى لهذه الطريقة ${minAmt}$. أدخل مبلغاً أكبر:`);
+        }
         state.data.amount = amount;
 
         // الطرق التلقائية (شام كاش/سيرياتيل) لا تحتاج حقول إضافية كصورة الإيصال أو الملاحظة،
@@ -19217,6 +19207,10 @@ async function startBots(isHotRestart: boolean = false) {
           return userBot!.sendMessage(chatId, "❌ يرجى تسجيل الدخول أولاً.");
         }
 
+        {
+          const gateAuto = await userExtras.identityGate(bUser.id, state.data.methodId);
+          if (gateAuto) { userStates.delete(chatId); return userBot!.sendMessage(chatId, `🔒 ${gateAuto}`); }
+        }
         userBot!.sendMessage(chatId, "⏳ جاري التحقق من رقم العملية تلقائياً...");
         try {
           const result: any = await performAutoTopup({
