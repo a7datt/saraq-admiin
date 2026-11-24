@@ -2869,6 +2869,13 @@ export default function AdminPage({
       return { ok: res.ok, error: data?.error };
     };
 
+    const handleRejectShamcashInvoice = async (id: number): Promise<{ ok: boolean; error?: string }> => {
+      const res = await adminFetch(`/api/admin/shamcash-invoices/${id}/reject`, { method: "POST" });
+      const data = await res.json().catch(() => ({} as any));
+      fetchAdminTransactions();
+      return { ok: res.ok, error: data?.error };
+    };
+
     const handleAddCategory = async () => {
       if (!newCategory.name || newCategory.name.trim().length < 1) {
         return showToast("يرجى إدخال اسم القسم الرئيسي", 'error');
@@ -3481,7 +3488,7 @@ export default function AdminPage({
           {adminTab === "orders" && <AdminOrdersAdminPage adminOrders={adminOrders} orderSearch={orderSearch} setOrderSearch={setOrderSearch} orderDateFilter={orderDateFilter} setOrderDateFilter={setOrderDateFilter} fetchAdminOrders={fetchAdminOrders} adminFetch={adminFetch} focusId={focusTarget?.type === "order" ? focusTarget.id : null} clearFocusId={() => setFocusTarget && setFocusTarget(null)} setAdminTab={setAdminTab} setFocusTarget={setFocusTarget} ordersLoading={adminOrdersLoading} />}
 
           {/* ===== TRANSACTIONS ===== */}
-          {adminTab === "transactions" && <AdminTransactionsPage adminTransactions={adminTransactions} transSearch={transSearch} setTransSearch={setTransSearch} handleApproveTransaction={handleApproveTransaction} handleRejectTransaction={handleRejectTransaction} adminFetch={adminFetch} handleApproveShamcashInvoice={handleApproveShamcashInvoice} focusId={focusTarget?.type === "transaction" ? focusTarget.id : null} clearFocusId={() => setFocusTarget && setFocusTarget(null)} />}
+          {adminTab === "transactions" && <AdminTransactionsPage adminTransactions={adminTransactions} transSearch={transSearch} setTransSearch={setTransSearch} handleApproveTransaction={handleApproveTransaction} handleRejectTransaction={handleRejectTransaction} adminFetch={adminFetch} handleApproveShamcashInvoice={handleApproveShamcashInvoice} handleRejectShamcashInvoice={handleRejectShamcashInvoice} focusId={focusTarget?.type === "transaction" ? focusTarget.id : null} clearFocusId={() => setFocusTarget && setFocusTarget(null)} />}
 
           {/* ===== ELEMENTS ===== */}
           {adminTab === "elements" && <AdminElementsPage categories={categories} subcategories={subcategories} subSubCategories={subSubCategories} fetchCategories={fetchCategories} fetchSubcategories={fetchSubcategories} fetchSubSubCategories={fetchSubSubCategories} paymentMethods={paymentMethods} fetchPaymentMethods={fetchPaymentMethods} banners={banners} fetchBanners={fetchBanners} offers={offers} fetchOffers={fetchOffers} handleDelete={handleDelete} handleToggleActive={handleToggleActive} adminFetch={adminFetch} focusTarget={focusTarget} clearFocusTarget={() => setFocusTarget && setFocusTarget(null)} />}

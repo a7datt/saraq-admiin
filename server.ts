@@ -8895,6 +8895,27 @@ async function startServer() {
         return res.status(statusCode).json(body);
       };
 
+      // تسجيل تدقيقي موحّد لكل محاولة تحقق تلقائي (نجحت أو رُفضت فعلياً من المزوّد نفسه — وليس
+      // "لم يُعثر عليها" فقط) في نفس جدول الفواتير، ليظهر نظام "كود التحقق" هذا (المستخدم لشام
+      // كاش/سيرياتيل/Binance/العملات الرقمية) جنباً إلى جنب مع نظام الفواتير التقليدي ضمن تبويب
+      // "الفواتير والشحن التلقائي" بلوحة التحكم. غير معطِّل للمسار الفعلي أبداً (try/catch صامت).
+      const logAutoVerifyAudit = async (status: "paid" | "rejected", amt: number, curr: string) => {
+        try {
+          await supabase.from("shamcash_invoices").insert({
+            invoice_number: `AUTO-${txNumber}-${claimedTx.id}`,
+            transaction_id: status === "paid" ? claimedTx.id : null,
+            user_id: userId,
+            payment_method_id: paymentMethodId,
+            amount: amt > 0 ? amt : numAmount,
+            currency: curr || "USD",
+            status,
+            gateway_code: INVOICE_ELIGIBLE_METHOD_TYPES[method.method_type] || method.method_type,
+          });
+        } catch (e) {
+          console.error(`[verify-auto] فشل تسجيل سجل التدقيق لمحاولة tx_number=${txNumber}:`, e);
+        }
+      };
+
       // ============ Wallet currency & exchange rate resolution (critical) ============
       // كل طريقة دفع آلية (شام كاش/سيرياتيل كاش) يجب أن تكون مرتبطة بعملة محددة من جدول العملات.
       // بدون سعر صرف صالح لهذه العملة، يجب رفض العملية فوراً (Reject Transaction).
@@ -8978,6 +8999,7 @@ async function startServer() {
         }
         if (!verified && rejectReason) {
           console.warn(`[SEC] verify-auto syriatel rejected — txNumber:${txNumber} reason:${rejectReason}`);
+          await logAutoVerifyAudit("rejected", numAmount, "SYP");
           return abortClaim(422, { error: rejectReason });
         }
       } else if (method.method_type === "shamcash") {
@@ -8999,6 +9021,7 @@ async function startServer() {
         }
         if (!verified && rejectReason) {
           console.warn(`[SEC] verify-auto shamcash rejected — txNumber:${txNumber} reason:${rejectReason}`);
+          await logAutoVerifyAudit("rejected", numAmount, expectedCurrency);
           return abortClaim(422, { error: rejectReason });
         }
       } else if (method.method_type === "binance") {
@@ -9016,6 +9039,7 @@ async function startServer() {
         }
         if (!verified && rejectReason) {
           console.warn(`[SEC] verify-auto binance rejected — txNumber:${txNumber} reason:${rejectReason}`);
+          await logAutoVerifyAudit("rejected", numAmount, expectedCurrency);
           return abortClaim(422, { error: rejectReason });
         }
       } else if (method.method_type === "crypto_usdt_trc20" || method.method_type === "crypto_usdt_bep20") {
@@ -9030,6 +9054,7 @@ async function startServer() {
         }
         if (!verified && rejectReason) {
           console.warn(`[SEC] verify-auto ${method.method_type} rejected — txNumber:${txNumber} reason:${rejectReason}`);
+          await logAutoVerifyAudit("rejected", numAmount, "USD");
           return abortClaim(422, { error: rejectReason });
         }
       }
@@ -9100,6 +9125,7 @@ async function startServer() {
         .eq("status", "pending_verification")
         .select().single();
       if (txErr) throw txErr;
+      await logAutoVerifyAudit("paid", apiAmount, apiCurrency);
 
       // [FIX] إصلاح Lost Update: استبدال read-then-write (user.balance + finalUsdAmount ثم UPDATE مطلق)
       // بالـ RPC الذرّي increment_balance المستخدم بباقي المشروع، لمنع فقدان أحد المبلغين عند تزامن شحنين تلقائيين.
@@ -12306,7 +12332,10 @@ ${responseText}`);
       const statusFilter = typeof req.query.status === "string" ? req.query.status : undefined;
       const limitRaw = parseInt(String(req.query.limit || "25"), 10);
       const offsetRaw = parseInt(String(req.query.offset || "0"), 10);
-      const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(100, limitRaw)) : 25;
+      // [FIX] الحد الأقصى رُفع من 100 إلى 1000 — تبويب "الفواتير والشحن التلقائي" الجديد بلوحة
+      // التحكم يجلب كل الفواتير دفعة واحدة (بكل الحالات) ليُطبّق الفرز والبحث محلياً في الواجهة
+      // بنفس نمط بقية تبويبات صفحة الدفعات، بدل صفحات 25 عنصراً كما كان سابقاً.
+      const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(1000, limitRaw)) : 25;
       const offset = Number.isFinite(offsetRaw) ? Math.max(0, offsetRaw) : 0;
 
       const mapRow = (inv: any) => {
@@ -12334,7 +12363,7 @@ ${responseText}`);
         };
       };
 
-      if (statusFilter && ["pending", "paid", "cancelled", "expired"].includes(statusFilter)) {
+      if (statusFilter && ["pending", "paid", "cancelled", "expired", "rejected"].includes(statusFilter)) {
         // [FIX] الحالة الفعلية قد تختلف عن العمود الخام لو انتهت الفاتورة بالزمن دون أن يُحدَّث
         // سجلها بعد (يبقى status='pending' خاماً) — لذلك نجلب الصفوف الخام المطابقة ونُرشّحها
         // بحسب الحالة الفعلية المحسوبة، بدل تصفية قاعدة البيانات مباشرة على العمود الخام.
@@ -12472,6 +12501,42 @@ ${responseText}`);
       if (freshUserRow?.telegram_chat_id) userBot?.sendMessage(freshUserRow.telegram_chat_id, `✅ تم قبول فاتورة ${GATEWAY_LABEL_AR[(inv.gateway_code || "shamcash") as GatewayCode]} يدوياً وشحن رصيدك بـ ${finalUsdAmount.toFixed(4)}$ بنجاح!`);
 
       res.json({ success: true, newBalance, addedUsd: finalUsdAmount });
+    } catch (e: any) {
+      safeError(res, e, undefined, req);
+    }
+  });
+
+  // POST /api/admin/shamcash-invoices/:id/reject — رفض يدوي لفاتورة معلّقة (لم يصل التحويل فعلياً،
+  // أو بيانات غير صحيحة) — يحرر حجز tx_number المرتبط بها فوراً دون إضافة أي رصيد، بنفس منطق CAS
+  // الذري المستخدم في القبول لمنع التعامل مع نفس الفاتورة مرتين بتزامن.
+  app.post("/api/admin/shamcash-invoices/:id/reject", async (req, res) => {
+    try {
+      const { data: inv, error: invErr } = await supabase.from("shamcash_invoices").select("*").eq("id", req.params.id).single();
+      if (invErr || !inv) return res.status(404).json({ error: "الفاتورة غير موجودة" });
+      if (inv.status !== "pending") {
+        const map: Record<string, string> = { paid: "هذه الفاتورة مقبولة بالفعل.", expired: "انتهت صلاحية هذه الفاتورة.", cancelled: "تم إلغاء هذه الفاتورة.", rejected: "تم رفض هذه الفاتورة بالفعل." };
+        return res.status(409).json({ error: map[inv.status] || "حالة الفاتورة لا تسمح بالرفض" });
+      }
+
+      const { data: casRows, error: casErr } = await supabase
+        .from("shamcash_invoices")
+        .update({ status: "rejected", updated_at: new Date().toISOString() })
+        .eq("id", inv.id)
+        .eq("status", "pending")
+        .select("id");
+      if (casErr) throw casErr;
+      if (!Array.isArray(casRows) || casRows.length === 0) {
+        return res.status(409).json({ error: "تمت معالجة هذه الفاتورة بالفعل من قبل" });
+      }
+
+      if (inv.transaction_id) {
+        await supabase.from("transactions").delete().eq("id", inv.transaction_id).eq("status", "pending_verification");
+      }
+
+      await logAdminActivity({ action_type: "invoice_rejected", target_model: "shamcash_invoices", target_id: String(inv.id), details: `تم رفض فاتورة ${GATEWAY_LABEL_AR[(inv.gateway_code || "shamcash") as GatewayCode]} رقم ${inv.invoice_number}`, req });
+      sendTelegramToUser(inv.user_id, `❌ تم رفض فاتورة ${GATEWAY_LABEL_AR[(inv.gateway_code || "shamcash") as GatewayCode]} رقم ${inv.invoice_number}. تواصل مع الدعم إن كنت قد أتممت الدفع فعلياً.`);
+
+      res.json({ success: true });
     } catch (e: any) {
       safeError(res, e, undefined, req);
     }

@@ -300,3 +300,10 @@ ON CONFLICT (key) DO NOTHING;
 CREATE INDEX IF NOT EXISTS idx_products_provider_external ON public.products (provider_id, external_id);
 CREATE INDEX IF NOT EXISTS idx_products_subcat_order ON public.products (subcategory_id, order_index, id);
 CREATE INDEX IF NOT EXISTS idx_products_category_order ON public.products (category_id, order_index, id);
+CREATE INDEX IF NOT EXISTS idx_products_category_order ON public.products (category_id, order_index, id);
+
+-- ==========================================================================
+-- [INVOICES] 2026-11-24 — السماح بحالة rejected في فواتير الدفع الآلي (تبويب "الفواتير والشحن التلقائي")
+-- ==========================================================================
+ALTER TABLE public.shamcash_invoices DROP CONSTRAINT IF EXISTS shamcash_invoices_status_check;
+ALTER TABLE public.shamcash_invoices ADD CONSTRAINT shamcash_invoices_status_check CHECK (status = ANY (ARRAY['pending'::text, 'paid'::text, 'expired'::text, 'cancelled'::text, 'rejected'::text]));

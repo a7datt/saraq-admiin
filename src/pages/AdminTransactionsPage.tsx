@@ -1,7 +1,7 @@
 import VerifiedBadge from "../components/VerifiedBadge";
 import React from "react";
 import OptimizedImage from "../components/OptimizedImage";
-import { Search, ChevronDown, User, Wallet, CheckCircle, XCircle, AlertTriangle, Clock, DollarSign, X, CalendarDays, History, Share2, Image as ImageIcon, FileText, Table } from "lucide-react";
+import { Search, ChevronDown, User, Wallet, CheckCircle, XCircle, AlertTriangle, Clock, DollarSign, X, CalendarDays, History, Share2, Image as ImageIcon, FileText, Table, Receipt, Zap } from "lucide-react";
 import { shareOrderAsImage, shareOrderAsPdf, shareOrderAsCsv, buildTransactionShareRows } from "../utils/orderShare";
 import { showToast } from "../components/ToastContainer";
 
@@ -68,38 +68,66 @@ const parseCustomFieldsData = (raw: any): Array<{ key?: string; label: string; v
   } catch { return []; }
 };
 
-type StatusFilter = "pending" | "approved" | "rejected";
+type StatusFilter = "pending" | "approved" | "rejected" | "invoices";
 
 const toIsoDate = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
 const INVOICE_STATUS_BADGE: Record<string, { label: string; cls: string }> = {
   pending: { label: "معلّقة", cls: "bg-amber-100 text-amber-700" },
   paid: { label: "مقبولة", cls: "bg-green-100 text-green-700" },
+  rejected: { label: "مرفوضة", cls: "bg-red-100 text-red-600" },
   cancelled: { label: "ملغاة", cls: "bg-gray-200 text-gray-600" },
-  expired: { label: "منتهية", cls: "bg-red-100 text-red-600" },
+  expired: { label: "منتهية", cls: "bg-orange-100 text-orange-600" },
 };
+
+const INVOICE_STATUS_TABS: { key: "all" | "pending" | "paid" | "rejected" | "cancelled" | "expired"; label: string }[] = [
+  { key: "all", label: "الكل" },
+  { key: "pending", label: "معلّقة" },
+  { key: "paid", label: "مقبولة" },
+  { key: "rejected", label: "مرفوضة" },
+  { key: "cancelled", label: "ملغاة" },
+  { key: "expired", label: "منتهية" },
+];
 
 const INVOICE_GATEWAY_LABEL: Record<string, string> = {
   shamcash: "شام كاش",
   syriatelcash: "سيرياتيل كاش",
+  binance: "Binance Pay",
   crypto_usdt_trc20: "USDT (TRC20)",
   crypto_usdt_bep20: "USDT (BEP20)",
 };
 
+const formatInvoiceCurrency = (amount: number, currency: string) => {
+  const amt = Number(amount || 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
+  if (currency === "USD") return `${amt} $`;
+  if (currency === "USDT") return `${amt} USDT`;
+  return `${amt} ل.س`;
+};
+
+// فواتير نظام التحقق التلقائي (شام كاش/سيرياتيل/العملات الرقمية) تبدأ بـ invoice_number حقيقي من
+// المزوّد، بينما سجلات التدقيق التلقائية لـ"نظام كود التحقق" (يشمل Binance الذي لا يملك فواتير
+// حقيقية أصلاً) تُخزَّن بمعرّف مصطنع بادئته AUTO- — نميّزها هنا فقط لعرض تسمية أوضح للأدمن.
+const isAutoVerifyAuditRow = (inv: any) => typeof inv.invoice_number === "string" && inv.invoice_number.startsWith("AUTO-");
+
 const ShamCashInvoiceRow: React.FC<{
-  inv: any; tranId: string; onTranIdChange: (v: string) => void; onApprove: () => void; busy: boolean;
-}> = ({ inv, tranId, onTranIdChange, onApprove, busy }) => {
+  inv: any; tranId: string; onTranIdChange: (v: string) => void; onApprove: () => void; onReject: () => void; busy: boolean;
+}> = ({ inv, tranId, onTranIdChange, onApprove, onReject, busy }) => {
   const badge = INVOICE_STATUS_BADGE[inv.status] || { label: inv.status, cls: "bg-gray-100 text-gray-500" };
+  const isAuto = isAutoVerifyAuditRow(inv);
   return (
     <div className="p-3">
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0 flex-1">
           <p className="text-xs font-bold text-gray-700 truncate">{inv.user_name}{inv.user_identity_verified && <VerifiedBadge />} <span className="text-gray-400 font-normal">#{inv.user_db_id}</span></p>
-          <p className="text-[10px] text-gray-400 truncate">فاتورة {inv.invoice_number} · {inv.payment_method_name} <span className="text-gray-300">·</span> {INVOICE_GATEWAY_LABEL[inv.gateway_code] || inv.gateway_code}</p>
+          <p className="text-[10px] text-gray-400 truncate flex items-center gap-1 flex-wrap">
+            {isAuto ? <span className="inline-flex items-center gap-0.5 text-cyan-600 font-bold"><Zap size={10} />كود تحقق تلقائي</span> : <span>فاتورة {inv.invoice_number}</span>}
+            <span className="text-gray-300">·</span> {inv.payment_method_name}
+            <span className="text-gray-300">·</span> {INVOICE_GATEWAY_LABEL[inv.gateway_code] || inv.gateway_code}
+          </p>
           <p className="text-[10px] text-gray-400">{new Date(inv.created_at).toLocaleString("ar-EG")}</p>
         </div>
         <div className="text-left shrink-0">
-          <p className="text-sm font-black text-gray-700">{Number(inv.amount || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })} {inv.currency === "USD" ? "$" : "ل.س"}</p>
+          <p className="text-sm font-black text-gray-700">{formatInvoiceCurrency(inv.amount, inv.currency)}</p>
           <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${badge.cls}`}>{badge.label}</span>
         </div>
       </div>
@@ -119,59 +147,57 @@ const ShamCashInvoiceRow: React.FC<{
           >
             <CheckCircle size={12} />قبول
           </button>
+          <button
+            disabled={busy}
+            onClick={onReject}
+            className="shrink-0 bg-red-100 text-red-600 px-3 py-1.5 rounded-md text-[11px] font-bold flex items-center gap-1 active:scale-95 disabled:opacity-50"
+          >
+            <XCircle size={12} />رفض
+          </button>
         </div>
       )}
     </div>
   );
 };
 
-// حاوية مغلقة افتراضياً — بينما هي مغلقة تعرض أحدث 5 فواتير معلّقة فقط (معاينة سريعة بلا تحميل
-// ثقيل). بالضغط عليها تنفتح وتجلب كل الفواتير (كل الحالات) صفحة 25 فاتورة، مع زر "عرض المزيد"
-// لجلب الصفحة التالية من الخادم عند الحاجة فقط.
-const ShamCashInvoicesPanel = ({ adminFetch, handleApproveShamcashInvoice }: { adminFetch: any; handleApproveShamcashInvoice: (id: number, tranId?: string) => Promise<{ ok: boolean; error?: string }> }) => {
-  const PAGE_SIZE = 25;
-  const [open, setOpen] = React.useState(false);
-  const [preview, setPreview] = React.useState<any[]>([]);
-  const [fullList, setFullList] = React.useState<any[]>([]);
-  const [fullListLoaded, setFullListLoaded] = React.useState(false);
-  const [loadingMore, setLoadingMore] = React.useState(false);
-  const [hasMore, setHasMore] = React.useState(false);
+// ─── تبويب "الفواتير والشحن التلقائي" ───
+// يجمع في مكان واحد كل عمليات الدفع الآلي لكل البوابات (شام كاش، سيرياتيل كاش، العملات الرقمية،
+// Binance Pay) بكل حالاتها: معلّقة/مقبولة/مرفوضة/ملغاة/منتهية — سواء كانت فاتورة حقيقية من
+// نظام الفواتير، أو محاولة تحقق من نظام "كود التحقق" المباشر.
+const InvoicesAndAutoChargePanel = ({
+  adminFetch,
+  handleApproveShamcashInvoice,
+  handleRejectShamcashInvoice,
+  focusInvoiceId,
+}: {
+  adminFetch: any;
+  handleApproveShamcashInvoice: (id: number, tranId?: string) => Promise<{ ok: boolean; error?: string }>;
+  handleRejectShamcashInvoice: (id: number) => Promise<{ ok: boolean; error?: string }>;
+  focusInvoiceId?: number | string | null;
+}) => {
+  const [list, setList] = React.useState<any[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [statusFilter, setStatusFilter] = React.useState<"all" | "pending" | "paid" | "rejected" | "cancelled" | "expired">("all");
+  const [search, setSearch] = React.useState("");
   const [tranIds, setTranIds] = React.useState<Record<number, string>>({});
   const [busyId, setBusyId] = React.useState<number | null>(null);
+  const [visibleCount, setVisibleCount] = React.useState(50);
+  const PAGE_SIZE = 50;
 
-  const fetchJson = React.useCallback(async (qs: string) => {
+  const load = React.useCallback(async () => {
+    setLoading(true);
     try {
-      const res = await adminFetch(`/api/admin/shamcash-invoices?${qs}`, { headers: { "x-admin-token": localStorage.getItem("adminToken") || "" } });
+      const res = await adminFetch(`/api/admin/shamcash-invoices?limit=1000`);
       const data = await res.json();
-      return { invoices: Array.isArray(data?.invoices) ? data.invoices : [], hasMore: !!data?.hasMore };
+      setList(Array.isArray(data?.invoices) ? data.invoices : []);
     } catch {
-      return { invoices: [] as any[], hasMore: false };
+      setList([]);
+    } finally {
+      setLoading(false);
     }
   }, [adminFetch]);
 
-  const fetchPreview = React.useCallback(async () => {
-    const data = await fetchJson("status=pending&limit=5");
-    setPreview(data.invoices);
-  }, [fetchJson]);
-
-  React.useEffect(() => { fetchPreview(); }, [fetchPreview]);
-
-  const fetchFullPage = async (offset: number) => {
-    setLoadingMore(true);
-    const data = await fetchJson(`limit=${PAGE_SIZE}&offset=${offset}`);
-    setFullList(prev => (offset === 0 ? data.invoices : [...prev, ...data.invoices]));
-    setHasMore(data.hasMore);
-    setLoadingMore(false);
-  };
-
-  const toggleOpen = () => {
-    const next = !open;
-    setOpen(next);
-    if (next && !fullListLoaded) {
-      setFullListLoaded(true);
-      fetchFullPage(0);
-    }
-  };
+  React.useEffect(() => { load(); }, [load]);
 
   const setTranId = (id: number, v: string) => setTranIds(prev => ({ ...prev, [id]: v }));
 
@@ -182,61 +208,123 @@ const ShamCashInvoicesPanel = ({ adminFetch, handleApproveShamcashInvoice }: { a
     if (result.ok) {
       showToast("تم قبول الفاتورة وشحن رصيد المستخدم", "success");
       setTranIds(prev => { const n = { ...prev }; delete n[id]; return n; });
-      fetchPreview();
-      if (open) fetchFullPage(0);
+      load();
     } else {
       showToast(result.error || "تعذّر قبول الفاتورة", "error");
     }
   };
 
+  const onReject = async (id: number) => {
+    setBusyId(id);
+    const result = await handleRejectShamcashInvoice(id);
+    setBusyId(null);
+    if (result.ok) {
+      showToast("تم رفض الفاتورة", "success");
+      load();
+    } else {
+      showToast(result.error || "تعذّر رفض الفاتورة", "error");
+    }
+  };
+
+  const counts = React.useMemo(() => ({
+    all: list.length,
+    pending: list.filter(i => i.status === "pending").length,
+    paid: list.filter(i => i.status === "paid").length,
+    rejected: list.filter(i => i.status === "rejected").length,
+    cancelled: list.filter(i => i.status === "cancelled").length,
+    expired: list.filter(i => i.status === "expired").length,
+  }), [list]);
+
+  const filtered = list.filter(inv => {
+    const matchesStatus = statusFilter === "all" || inv.status === statusFilter;
+    const q = search.trim();
+    const matchesSearch = !q
+      || inv.user_name?.includes(q)
+      || inv.user_email?.includes(q)
+      || String(inv.invoice_number || "").includes(q)
+      || String(inv.user_db_id ?? "").includes(q);
+    return matchesStatus && matchesSearch;
+  });
+
+  React.useEffect(() => { setVisibleCount(PAGE_SIZE); }, [statusFilter, search]);
+
+  // عند القدوم من "أحدث النشاطات" بفاتورة محددة
+  React.useEffect(() => {
+    if (focusInvoiceId == null) return;
+    const target = list.find((i: any) => String(i.id) === String(focusInvoiceId));
+    if (target) setStatusFilter(target.status === "paid" || target.status === "rejected" || target.status === "cancelled" || target.status === "expired" ? target.status : "pending");
+  }, [focusInvoiceId, list]);
+
   return (
-    <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
-      <button type="button" onClick={toggleOpen} className="w-full px-4 py-3 border-b border-gray-50 flex items-center gap-2">
-        <div className="w-8 h-8 rounded-lg bg-cyan-50 flex items-center justify-center text-cyan-600 shrink-0"><FileText size={15} /></div>
-        <h3 className="font-black text-gray-800 text-sm flex-1 text-right">فواتير الدفع الآلي</h3>
-        <ChevronDown size={16} className={`text-gray-400 transition-transform shrink-0 ${open ? "rotate-180" : ""}`} />
-      </button>
+    <div className="space-y-3">
+      <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
+        {INVOICE_STATUS_TABS.map(tab => (
+          <button
+            key={tab.key}
+            onClick={() => setStatusFilter(tab.key)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold whitespace-nowrap border transition-all active:scale-95 ${
+              statusFilter === tab.key ? "bg-cyan-600 text-white border-transparent" : "bg-white border-gray-100 text-gray-500"
+            }`}
+          >
+            {tab.label}
+            <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${statusFilter === tab.key ? "bg-white/20" : "bg-gray-100 text-gray-500"}`}>
+              {counts[tab.key]}
+            </span>
+          </button>
+        ))}
+      </div>
 
-      {!open && (
-        <div className="divide-y divide-gray-50">
-          {preview.length > 0 && (
-            <p className="px-4 pt-2.5 pb-1 text-[10px] text-gray-400 font-bold">أحدث الفواتير المعلّقة</p>
-          )}
-          {preview.map((inv) => (
-            <ShamCashInvoiceRow key={inv.id} inv={inv} tranId={tranIds[inv.id] || ""} onTranIdChange={(v) => setTranId(inv.id, v)} onApprove={() => onApprove(inv.id)} busy={busyId === inv.id} />
-          ))}
-          {preview.length === 0 && (
-            <p className="text-center text-gray-400 text-xs py-4">لا توجد فواتير معلّقة حالياً</p>
-          )}
-        </div>
-      )}
+      <div className="relative">
+        <Search size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400" />
+        <input
+          type="text"
+          placeholder="بحث بالاسم، البريد، رقم الفاتورة، أو رقم الدخول..."
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          className="w-full bg-white border border-gray-100 rounded-lg pr-9 pl-3 py-2.5 text-xs outline-none shadow-sm"
+        />
+      </div>
 
-      {open && (
-        <>
-          <div className="divide-y divide-gray-50">
-            {fullList.map((inv) => (
-              <ShamCashInvoiceRow key={inv.id} inv={inv} tranId={tranIds[inv.id] || ""} onTranIdChange={(v) => setTranId(inv.id, v)} onApprove={() => onApprove(inv.id)} busy={busyId === inv.id} />
-            ))}
-            {fullList.length === 0 && !loadingMore && (
-              <p className="text-center text-gray-400 text-xs py-6">لا توجد فواتير</p>
-            )}
+      <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden divide-y divide-gray-50">
+        {loading && <p className="text-center text-gray-400 text-xs py-8">جاري التحميل...</p>}
+        {!loading && filtered.slice(0, visibleCount).map((inv) => (
+          <ShamCashInvoiceRow
+            key={inv.id}
+            inv={inv}
+            tranId={tranIds[inv.id] || ""}
+            onTranIdChange={(v) => setTranId(inv.id, v)}
+            onApprove={() => onApprove(inv.id)}
+            onReject={() => onReject(inv.id)}
+            busy={busyId === inv.id}
+          />
+        ))}
+        {!loading && filtered.length === 0 && (
+          <div className="text-center py-12 text-gray-400">
+            <Receipt size={36} className="mx-auto mb-3 opacity-20" />
+            <p className="text-sm">لا توجد فواتير مطابقة</p>
           </div>
-          {hasMore && (
-            <button
-              disabled={loadingMore}
-              onClick={() => fetchFullPage(fullList.length)}
-              className="w-full py-2.5 text-xs font-bold text-[var(--brand)] border-t border-gray-50 active:scale-[0.98] disabled:opacity-50"
-            >
-              {loadingMore ? "جاري التحميل..." : "عرض المزيد"}
-            </button>
-          )}
-        </>
+        )}
+      </div>
+
+      {filtered.length > visibleCount && (
+        <div className="flex flex-col items-center gap-2 pt-1 pb-1">
+          <button
+            onClick={() => setVisibleCount(c => c + PAGE_SIZE)}
+            className="w-full sm:w-auto px-6 py-2.5 rounded-md text-xs font-bold bg-[var(--brand)] text-white active:scale-[0.97] transition-transform"
+          >
+            عرض المزيد
+          </button>
+          <p className="text-[11px] text-gray-400">
+            تم عرض {Math.min(visibleCount, filtered.length)} من {filtered.length}
+          </p>
+        </div>
       )}
     </div>
   );
 };
 
-const AdminTransactionsPage = ({adminTransactions, transSearch, setTransSearch, handleApproveTransaction, handleRejectTransaction, adminFetch, handleApproveShamcashInvoice, focusId, clearFocusId}: any) => {
+
+const AdminTransactionsPage = ({adminTransactions, transSearch, setTransSearch, handleApproveTransaction, handleRejectTransaction, adminFetch, handleApproveShamcashInvoice, handleRejectShamcashInvoice, focusId, clearFocusId}: any) => {
   const [expandedId, setExpandedId] = React.useState<number|null>(null);
   const [customAmounts, setCustomAmounts] = React.useState<Record<number,string>>({});
   const [statusFilter, setStatusFilter] = React.useState<StatusFilter>("pending");
@@ -308,11 +396,13 @@ const AdminTransactionsPage = ({adminTransactions, transSearch, setTransSearch, 
     return () => clearTimeout(t);
   }, [focusId]);
 
-  const statusTabs: { key: StatusFilter; label: string; count: number; activeClass: string }[] = [
+  const statusTabs: { key: StatusFilter; label: string; count: number | null; activeClass: string }[] = [
     { key: "pending", label: "قيد التحقق", count: pendingCount, activeClass: "bg-amber-500 text-white border-transparent" },
     { key: "approved", label: "مكتملة", count: approvedCount, activeClass: "bg-green-500 text-white border-transparent" },
     { key: "rejected", label: "مرفوضة", count: rejectedCount, activeClass: "bg-red-500 text-white border-transparent" },
+    { key: "invoices", label: "الفواتير والشحن التلقائي", count: null, activeClass: "bg-cyan-600 text-white border-transparent" },
   ];
+  const isInvoicesTab = statusFilter === "invoices";
 
   return (
 
@@ -346,23 +436,28 @@ const AdminTransactionsPage = ({adminTransactions, transSearch, setTransSearch, 
           {tab.key === "pending" && <Clock size={13} />}
           {tab.key === "approved" && <CheckCircle size={13} />}
           {tab.key === "rejected" && <XCircle size={13} />}
+          {tab.key === "invoices" && <Receipt size={13} />}
           {tab.label}
-          <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
-            statusFilter === tab.key ? "bg-white/20" : "bg-gray-100 text-gray-500"
-          }`}>{tab.count}</span>
+          {tab.count !== null && (
+            <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+              statusFilter === tab.key ? "bg-white/20" : "bg-gray-100 text-gray-500"
+            }`}>{tab.count}</span>
+          )}
         </button>
       ))}
-      <button
-        onClick={() => setShowDatePicker(v => !v)}
-        className={`flex items-center gap-1 px-2.5 py-2 rounded-lg text-xs font-bold border shrink-0 active:scale-95 ${
-          hasDateFilter ? "bg-brand text-white border-transparent" : "bg-white border-gray-100 text-gray-500"
-        }`}
-      >
-        <CalendarDays size={14} />
-      </button>
+      {!isInvoicesTab && (
+        <button
+          onClick={() => setShowDatePicker(v => !v)}
+          className={`flex items-center gap-1 px-2.5 py-2 rounded-lg text-xs font-bold border shrink-0 active:scale-95 ${
+            hasDateFilter ? "bg-brand text-white border-transparent" : "bg-white border-gray-100 text-gray-500"
+          }`}
+        >
+          <CalendarDays size={14} />
+        </button>
+      )}
     </div>
 
-    {showDatePicker && (
+    {!isInvoicesTab && showDatePicker && (
       <div className="bg-white border border-gray-100 rounded-lg p-3 shadow-sm flex items-center gap-2">
         <div className="flex-1 space-y-1">
           <label className="text-[10px] font-bold text-gray-400">من</label>
@@ -382,14 +477,18 @@ const AdminTransactionsPage = ({adminTransactions, transSearch, setTransSearch, 
       </div>
     )}
 
+    {isInvoicesTab ? (
+      <InvoicesAndAutoChargePanel
+        adminFetch={adminFetch}
+        handleApproveShamcashInvoice={handleApproveShamcashInvoice}
+        handleRejectShamcashInvoice={handleRejectShamcashInvoice}
+      />
+    ) : (
+    <>
     <div className="relative">
       <Search size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400"/>
       <input type="text" placeholder="بحث بالاسم، البريد، رقم العملية، أو رقم الدخول..." value={transSearch} onChange={e => setTransSearch(e.target.value)} className="w-full bg-white border border-gray-100 rounded-lg pr-9 pl-3 py-2.5 text-xs outline-none shadow-sm"/>
     </div>
-
-    {statusFilter === "pending" && (
-      <ShamCashInvoicesPanel adminFetch={adminFetch} handleApproveShamcashInvoice={handleApproveShamcashInvoice} />
-    )}
 
     <div className="space-y-3">
       {filteredTrans.slice(0, transVisibleCount).map(t => {
@@ -572,6 +671,8 @@ const AdminTransactionsPage = ({adminTransactions, transSearch, setTransSearch, 
         </div>
       )}
     </div>
+    </>
+    )}
 
     {showLedger && (
       <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => setShowLedger(false)}>
