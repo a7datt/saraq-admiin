@@ -146,6 +146,8 @@ export interface PaymentMethod {
   wallet_address: string;
   qr_enabled?: boolean;
   qr_always_open?: boolean;
+  qr_mode?: "auto" | "image";
+  qr_image_url?: string | null;
   instructions: string;
   description?: string;
   image_url: string;

@@ -203,3 +203,19 @@ CREATE INDEX IF NOT EXISTS rank_categories_rank_id_idx ON public.rank_categories
 -- نهاية السجل — آخر تحديث: 2026-11-14
 -- كل الاستعلامات أعلاه idempotent؛ تنفيذها مرة أخرى على نفس القاعدة آمن.
 -- =====================================================================
+-- نهاية السجل — آخر تحديث: 2026-11-14
+-- كل الاستعلامات أعلاه idempotent؛ تنفيذها مرة أخرى على نفس القاعدة آمن.
+-- =====================================================================
+
+-- ==========================================================================
+-- [PHASE-1] 2026-11-24 — مصدر QR لطرق الدفع + الشريط النصي المتحرك
+-- ==========================================================================
+ALTER TABLE public.payment_methods
+  ADD COLUMN IF NOT EXISTS qr_mode text NOT NULL DEFAULT 'auto',
+  ADD COLUMN IF NOT EXISTS qr_image_url text;
+ALTER TABLE public.payment_methods DROP CONSTRAINT IF EXISTS payment_methods_qr_mode_check;
+ALTER TABLE public.payment_methods ADD CONSTRAINT payment_methods_qr_mode_check CHECK (qr_mode IN ('auto','image'));
+
+ALTER TABLE public.store_appearance
+  ADD COLUMN IF NOT EXISTS marquee_enabled boolean NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS marquee_text text NOT NULL DEFAULT '';

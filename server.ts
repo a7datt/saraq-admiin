@@ -12312,7 +12312,7 @@ ${responseText}`);
 
   app.post("/api/admin/payment-methods", async (req, res) => {
     try {
-      const { name, image_url, wallet_address, qr_enabled, qr_always_open, instructions, description, min_amount, active, method_type, api_account, payment_currency, custom_fields, bonus_type, bonus_percent, bonus_visible } = req.body;
+      const { name, image_url, wallet_address, qr_enabled, qr_always_open, qr_mode, qr_image_url, instructions, description, min_amount, active, method_type, api_account, payment_currency, custom_fields, bonus_type, bonus_percent, bonus_visible } = req.body;
       let { currency_id } = req.body;
 
       const normalizedBonusType = ["commission", "bonus"].includes(bonus_type) ? bonus_type : null;
@@ -12353,7 +12353,15 @@ ${responseText}`);
         return res.status(400).json({ error: "رابط الصورة غير صحيح" });
       }
 
+      // [PHASE-1] مصدر الـ QR: auto (توليد من العنوان) أو image (صورة مرفوعة) — تحقق من السيرفر
+      if (qr_image_url && !isValidUrl(qr_image_url)) {
+        return res.status(400).json({ error: "رابط صورة QR غير صحيح" });
+      }
+      const normQrImage = qr_image_url ? String(qr_image_url) : null;
+      const normQrMode = (qr_mode === "image" && normQrImage) ? "image" : "auto";
+
       const { data, error } = await supabase.from("payment_methods").insert({
+        qr_mode: normQrMode, qr_image_url: normQrImage,
         name, image_url, wallet_address, instructions, description: description || null, min_amount: isNaN(normalizedMinAmount) ? 0 : normalizedMinAmount, active,
         qr_enabled: !!qr_enabled && !!String(wallet_address || "").trim(),
         qr_always_open: !!qr_always_open && !!qr_enabled && !!String(wallet_address || "").trim(),
@@ -13742,7 +13750,7 @@ ${responseText}`);
 
   app.patch("/api/admin/payment-methods/:id", async (req, res) => {
     try {
-      const { name, image_url, wallet_address, qr_enabled, qr_always_open, min_amount, instructions, description, custom_fields, currency_id, payment_currency, method_type, bonus_type, bonus_percent, bonus_visible } = req.body;
+      const { name, image_url, wallet_address, qr_enabled, qr_always_open, qr_mode, qr_image_url, min_amount, instructions, description, custom_fields, currency_id, payment_currency, method_type, bonus_type, bonus_percent, bonus_visible } = req.body;
       // [SECURITY FIX] نفس الإصلاح المطبَّق على مسار الإنشاء
       if (image_url !== undefined && image_url && !isValidUrl(image_url)) {
         return res.status(400).json({ error: "رابط الصورة غير صحيح" });
@@ -13753,6 +13761,15 @@ ${responseText}`);
       if (wallet_address !== undefined) updateData.wallet_address = wallet_address;
       if (qr_enabled !== undefined) updateData.qr_enabled = !!qr_enabled;
       if (qr_always_open !== undefined) updateData.qr_always_open = !!qr_always_open;
+      // [PHASE-1] مصدر الـ QR (auto | image) — التحقق من السيرفر
+      if (qr_mode !== undefined || qr_image_url !== undefined) {
+        if (qr_image_url && !isValidUrl(qr_image_url)) {
+          return res.status(400).json({ error: "رابط صورة QR غير صحيح" });
+        }
+        const imgUrl = qr_image_url ? String(qr_image_url) : null;
+        if (qr_image_url !== undefined) updateData.qr_image_url = imgUrl;
+        if (qr_mode !== undefined) updateData.qr_mode = (qr_mode === "image" && imgUrl) ? "image" : "auto";
+      }
       // لا معنى لتفعيل QR (أو جعله مفتوحاً دائماً) بدون عنوان محفظة
       if (wallet_address !== undefined && !String(wallet_address || "").trim()) { updateData.qr_enabled = false; updateData.qr_always_open = false; }
       // "القفل المفتوح دائماً" غير منطقي بدون تفعيل QR أصلاً
@@ -14150,11 +14167,18 @@ ${responseText}`);
         "prod_columns_desktop", "prod_columns_mobile", "prod_image_ratio",
         "pay_columns_desktop", "pay_columns_mobile", "pay_image_ratio",
         "checkout_mode", "default_home_mode", "loading_spinner_type", "item_card_style", "search_enabled",
+        "marquee_enabled", "marquee_text",
         "font_scale", "font_size_cat", "font_size_sub", "font_size_subsub", "font_size_prod", "font_size_pay",
       ];
       const payload: any = { id: 1, updated_at: new Date().toISOString() };
       for (const key of allowed) if (req.body[key] !== undefined) payload[key] = req.body[key];
       if (payload.search_enabled !== undefined) payload.search_enabled = !!payload.search_enabled;
+      // [PHASE-1] الشريط النصي المتحرك بالصفحة الرئيسية
+      if (payload.marquee_enabled !== undefined) payload.marquee_enabled = !!payload.marquee_enabled;
+      if (payload.marquee_text !== undefined) {
+        if (typeof payload.marquee_text !== "string") return res.status(400).json({ error: "نص الشريط غير صحيح" });
+        payload.marquee_text = payload.marquee_text.trim().slice(0, 2000);
+      }
 
       if (payload.font_scale !== undefined) {
         const fs = Number(payload.font_scale);

@@ -2322,7 +2322,7 @@ export default function AdminPage({
       } catch {}
     };
     const [customFields, setCustomFields] = useState<Array<{id: string; key?: string; label: string; required: boolean; isDefault?: boolean}>>([]);
-    const [newPaymentMethod, setNewPaymentMethod] = useState({ name: "", image_url: "", wallet_address: "", qr_enabled: false, min_amount: "", instructions: "", description: "", method_type: "manual", api_account: "", payment_currency: "USD", currency_id: "" as string | number, bonus_type: "" as "" | "commission" | "bonus", bonus_percent: "" });
+    const [newPaymentMethod, setNewPaymentMethod] = useState({ name: "", image_url: "", wallet_address: "", qr_enabled: false, qr_mode: "auto", qr_image_url: "", min_amount: "", instructions: "", description: "", method_type: "manual", api_account: "", payment_currency: "USD", currency_id: "" as string | number, bonus_type: "" as "" | "commission" | "bonus", bonus_percent: "" });
     const [availableCurrencies, setAvailableCurrencies] = useState<Array<{ id: number; name: string; symbol: string; exchange_rate: number; is_default?: boolean }>>([]);
     // سيرياتيل كاش يقبل فقط عملة الليرة السورية (ل.س / SYP) لأن الـ API يرد بها حصراً
     const isSypCurrency = (c: { name?: string; symbol?: string }) => {
@@ -3048,7 +3048,7 @@ export default function AdminPage({
         body: JSON.stringify(payload)
       });
       if (res.ok) {
-        setNewPaymentMethod({ name: "", image_url: "", wallet_address: "", qr_enabled: false, min_amount: "", instructions: "", description: "", method_type: "manual", api_account: "", payment_currency: "USD", currency_id: "", bonus_type: "", bonus_percent: "" });
+        setNewPaymentMethod({ name: "", image_url: "", wallet_address: "", qr_enabled: false, qr_mode: "auto", qr_image_url: "", min_amount: "", instructions: "", description: "", method_type: "manual", api_account: "", payment_currency: "USD", currency_id: "", bonus_type: "", bonus_percent: "" });
         setPaymentMethodFields(ensurePaymentMethodDefaultFields([]));
         fetchPaymentMethods();
         showToast("تمت إضافة طريقة الدفع", 'info');
@@ -4063,6 +4063,19 @@ export default function AdminPage({
                     <AdminImageUpload label="صورة الطريقة" currentUrl={newPaymentMethod.image_url} onUpload={url => setNewPaymentMethod({...newPaymentMethod,image_url:url})}/>
                     <select className="w-full p-3 bg-gray-50 rounded-lg text-sm outline-none" value={newPaymentMethod.method_type} onChange={e => setNewPaymentMethod({...newPaymentMethod,method_type:e.target.value,api_account:"",payment_currency:"USD",currency_id:""})}><option value="manual">يدوي (إيصال)</option><option value="syriatel">سيريتل كاش تلقائي</option><option value="shamcash">شام كاش تلقائي</option><option value="binance">Binance Pay تلقائي</option><option value="crypto_usdt_trc20">عملات رقمية USDT (TRC20)</option><option value="crypto_usdt_bep20">عملات رقمية USDT (BEP20)</option></select>
                     <div className="flex gap-2 items-stretch"><input type="text" placeholder="رقم المحفظة / العنوان" className="flex-1 min-w-0 p-3 bg-gray-50 rounded-lg text-sm outline-none" value={newPaymentMethod.wallet_address} onChange={e => setNewPaymentMethod({...newPaymentMethod,wallet_address:e.target.value,qr_enabled:e.target.value.trim() ? newPaymentMethod.qr_enabled : false})}/><button type="button" disabled={!String(newPaymentMethod.wallet_address||"").trim()} onClick={() => setNewPaymentMethod({...newPaymentMethod,qr_enabled:!newPaymentMethod.qr_enabled})} title={!String(newPaymentMethod.wallet_address||"").trim() ? "اكتب عنوان المحفظة أولاً" : ""} className={`shrink-0 px-3 rounded-lg text-xs font-bold whitespace-nowrap transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${newPaymentMethod.qr_enabled && String(newPaymentMethod.wallet_address||"").trim() ? "bg-green-500 text-white" : "bg-white text-gray-600 border border-gray-200"}`}>{newPaymentMethod.qr_enabled && String(newPaymentMethod.wallet_address||"").trim() ? "تعطيل QR" : "تفعيل QR"}</button></div>
+                    {/* [PHASE-1] اختيار مصدر QR: توليد تلقائي من العنوان أو صورة QR جاهزة */}
+                    {newPaymentMethod.qr_enabled && String(newPaymentMethod.wallet_address||"").trim() && (
+                      <div className="space-y-2 bg-gray-50 rounded-xl p-3">
+                        <p className="text-xs font-bold text-gray-600">مصدر رمز الـ QR</p>
+                        <div className="grid grid-cols-2 gap-2">
+                          {[{val:"auto",label:"توليد تلقائي من العنوان"},{val:"image",label:"رفع صورة QR جاهزة"}].map(opt => (
+                            <button key={opt.val} type="button" onClick={() => setNewPaymentMethod({...newPaymentMethod,qr_mode:opt.val})} className={`p-2.5 rounded-lg border text-[11px] font-bold transition-colors ${(newPaymentMethod.qr_mode||"auto")===opt.val ? "bg-green-500 text-white border-green-500" : "bg-white text-gray-600 border-gray-200"}`}>{opt.label}</button>
+                          ))}
+                        </div>
+                        {newPaymentMethod.qr_mode==="image" && <AdminImageUpload label="صورة QR" currentUrl={newPaymentMethod.qr_image_url||""} onUpload={url => setNewPaymentMethod({...newPaymentMethod,qr_image_url:url})}/>}
+                        {newPaymentMethod.qr_mode==="image" && !newPaymentMethod.qr_image_url && <p className="text-[11px] text-amber-600">ارفع صورة الـ QR، وإلا سيُستخدم التوليد التلقائي.</p>}
+                      </div>
+                    )}
                     <textarea placeholder="وصف طريقة الدفع (اختياري - يظهر للمستخدم)" className="w-full p-3 bg-gray-50 rounded-lg text-sm outline-none h-16 resize-none" value={newPaymentMethod.description} onChange={e => setNewPaymentMethod({...newPaymentMethod,description:e.target.value})}/>
                     {(newPaymentMethod.method_type==="syriatel"||newPaymentMethod.method_type==="shamcash"||newPaymentMethod.method_type==="binance"||newPaymentMethod.method_type==="crypto_usdt_trc20"||newPaymentMethod.method_type==="crypto_usdt_bep20") && <input type="text" placeholder={newPaymentMethod.method_type==="syriatel"?"رقم GSM أو كود الكاش (8 أرقام)":newPaymentMethod.method_type==="binance"?"Binance ID الخاص بحساب المتجر (المستلم)":(newPaymentMethod.method_type==="crypto_usdt_trc20"||newPaymentMethod.method_type==="crypto_usdt_bep20")?"عنوان محفظة USDT (TRC20/BEP20)":"عنوان المحفظة (32 hex) أو رقم الحساب"} className="w-full p-3 bg-gray-50 rounded-lg text-sm outline-none font-mono" value={newPaymentMethod.api_account} onChange={e => setNewPaymentMethod({...newPaymentMethod,api_account:e.target.value})}/>}
                     {(newPaymentMethod.method_type==="manual"||newPaymentMethod.method_type==="syriatel"||newPaymentMethod.method_type==="shamcash"||newPaymentMethod.method_type==="binance"||newPaymentMethod.method_type==="crypto_usdt_trc20"||newPaymentMethod.method_type==="crypto_usdt_bep20") && (

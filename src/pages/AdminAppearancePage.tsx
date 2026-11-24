@@ -51,6 +51,8 @@ const DEFAULT_SETTINGS = {
   loading_spinner_type: "pixel",
   item_card_style: "card",
   search_enabled: true,
+  marquee_enabled: false,
+  marquee_text: "",
   font_scale: 100,
   font_size_cat: null,
   font_size_sub: null,
@@ -670,6 +672,45 @@ const AdminAppearancePage = ({ adminFetch }: { adminFetch: any }) => {
               </button>
             ))}
           </div>
+        </div>
+      </SectionCard>
+
+      {/* ===== [PHASE-1] الشريط النصي المتحرك بالصفحة الرئيسية ===== */}
+      <SectionCard icon={<Type size={16} className="text-red-500" />} title="الشريط النصي المتحرك">
+        <div className="space-y-3">
+          <p className="text-xs font-bold text-gray-600">
+            شريط نص متحرك يظهر تحت البانر مباشرة (وفوق البحث إن كان مفعّلاً) بلون الموقع الأساسي. إذا عُطّل لا يظهر نهائياً.
+          </p>
+          <div className="grid grid-cols-2 gap-2">
+            {[
+              { val: true, label: "مُفعَّل" },
+              { val: false, label: "مُعطَّل" },
+            ].map((opt) => (
+              <button
+                key={String(opt.val)}
+                onClick={() => { update("marquee_enabled", opt.val); saveSettings({ marquee_enabled: opt.val }); }}
+                className={`p-3 rounded-lg border text-[11px] font-bold transition-colors ${
+                  !!settings.marquee_enabled === opt.val ? "bg-blue-50 border-[var(--brand)] text-[var(--brand)]" : "bg-gray-50 border-gray-100 text-gray-500"
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <textarea
+            dir="rtl"
+            placeholder="اكتب نص الشريط (جملة كاملة بأي طول)"
+            className="w-full p-3 bg-gray-50 rounded-lg text-sm outline-none h-24 resize-none"
+            maxLength={2000}
+            value={settings.marquee_text || ""}
+            onChange={(e) => update("marquee_text", e.target.value)}
+          />
+          <button
+            onClick={() => saveSettings()}
+            className="w-full py-2.5 rounded-lg bg-[var(--brand)] text-white text-xs font-bold"
+          >
+            حفظ نص الشريط
+          </button>
         </div>
       </SectionCard>
 
