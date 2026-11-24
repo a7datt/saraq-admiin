@@ -293,3 +293,10 @@ INSERT INTO public.settings (key, value) VALUES
   ('identity_verification_enabled', 'false'),
   ('identity_verification_description', 'ارفع صورة واضحة للهوية من الأمام ومن الخلف. يجب أن تكون جميع البيانات مقروءة وغير مقصوصة.')
 ON CONFLICT (key) DO NOTHING;
+
+-- ==========================================================================
+-- [PERF] 2026-11-24 — فهارس لتسريع مزامنة المزوّد والتنقل بين الأقسام
+-- ==========================================================================
+CREATE INDEX IF NOT EXISTS idx_products_provider_external ON public.products (provider_id, external_id);
+CREATE INDEX IF NOT EXISTS idx_products_subcat_order ON public.products (subcategory_id, order_index, id);
+CREATE INDEX IF NOT EXISTS idx_products_category_order ON public.products (category_id, order_index, id);

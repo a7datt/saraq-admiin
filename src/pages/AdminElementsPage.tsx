@@ -628,8 +628,7 @@ const AdminElementsPage = React.forwardRef<AdminElementsPageHandle, any>(({categ
   const openProductEditorFor = async (item: any) => {
     let freshItem = item;
     try {
-      const all = await ensureAllProducts(true);
-      const found = all.find((p: any) => String(p.id) === String(item.id));
+      const found = await fetchOneProduct(item.id);
       if (found) freshItem = found;
     } catch { /* استخدام النسخة المحلية عند فشل الجلب */ }
     let parsedImageUrls: string[] = [];
@@ -667,8 +666,7 @@ const AdminElementsPage = React.forwardRef<AdminElementsPageHandle, any>(({categ
 
   const loadProductsForCategoryDirect = async (catId: number, force = false) => {
     setStoreLoading(true);
-    const all = await ensureAllProducts(force);
-    const direct = all.filter((p: any) => String(p.category_id) === String(catId) && !p.subcategory_id);
+    const direct = await fetchScopedProducts({ category_id: catId, direct: 1 });
     setDirectCategoryProducts(direct);
     setStoreProducts(direct);
     setStoreLoading(false);
@@ -869,6 +867,28 @@ const AdminElementsPage = React.forwardRef<AdminElementsPageHandle, any>(({categ
     setStoreLoading(false);
   };
 
+  // [PERF] جلب منتجات نطاق واحد فقط من السيرفر (بدل كل المنتجات) — يجعل التنقل بين الأقسام فورياً تقريباً
+  const fetchScopedProducts = async (params: Record<string, string | number>): Promise<any[]> => {
+    try {
+      const qs = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)])).toString();
+      const res = await adminFetch(`/api/admin/products-all?${qs}`);
+      if (!res.ok) {
+        let msg = "فشل تحميل المنتجات";
+        try { const d = await res.json(); if (d?.error) msg = d.error; } catch {}
+        if (res.status === 401 || res.status === 403) msg = "انتهت صلاحية جلسة الأدمن، يرجى تسجيل الدخول من جديد";
+        showToast(msg, "error");
+        return [];
+      }
+      const data = await res.json();
+      return Array.isArray(data) ? data : [];
+    } catch {
+      showToast("خطأ في الاتصال أثناء تحميل المنتجات", "error");
+      return [];
+    }
+  };
+
+  const fetchOneProduct = async (id: any): Promise<any | null> => (await fetchScopedProducts({ id }))[0] || null;
+
   const ensureAllProducts = async (force = false): Promise<any[]> => {
     if (!force && allProducts.length > 0) return allProducts;
     try {
@@ -894,25 +914,19 @@ const AdminElementsPage = React.forwardRef<AdminElementsPageHandle, any>(({categ
 
   const loadProductsForSubcat = async (subcatId: number, force = false) => {
     setStoreLoading(true);
-    const all = await ensureAllProducts(force);
-    setStoreProducts(all.filter((p: any) => String(p.subcategory_id) === String(subcatId)));
+    setStoreProducts(await fetchScopedProducts({ subcategory_id: subcatId }));
     setStoreLoading(false);
   };
 
   const loadProductsForSubSub = async (subSubId: number, force = false) => {
     setStoreLoading(true);
-    const all = await ensureAllProducts(force);
-    setStoreProducts(all.filter((p: any) => String(p.sub_sub_category_id) === String(subSubId)));
+    setStoreProducts(await fetchScopedProducts({ sub_sub_category_id: subSubId }));
     setStoreLoading(false);
   };
 
   const loadProductsForSubcatView = async (subcatId: number, force = false) => {
     setStoreLoading(true);
-    const all = await ensureAllProducts(force);
-    const direct = all.filter((p: any) =>
-      String(p.subcategory_id) === String(subcatId) &&
-      (p.sub_sub_category_id === null || p.sub_sub_category_id === undefined || p.sub_sub_category_id === "")
-    );
+    const direct = await fetchScopedProducts({ subcategory_id: subcatId, direct: 1 });
     setStoreProducts(direct);
     setStoreLoading(false);
   };
@@ -924,12 +938,15 @@ const AdminElementsPage = React.forwardRef<AdminElementsPageHandle, any>(({categ
     setSelectedCategoryId(cat.id);
     // تحميل منتجات مرتبطة مباشرة بالقسم الرئيسي (بدون قسم فرعي) لعرضها بنفس نظام الترتيب وعدد الأعمدة
     // [FIX-3] force=true لضمان جلب أحدث ترتيب محفوظ فعلياً بدل الاعتماد على نسخة مخزّنة قديمة
+    // [PERF] الجلبان (المنتجات المباشرة + الأقسام الفرعية) يتمّان بالتوازي وبنطاق القسم فقط
     try {
-      const all = await ensureAllProducts(true);
-      const direct = all.filter((p: any) => String(p.category_id) === String(cat.id) && !p.subcategory_id);
+      const [direct] = await Promise.all([
+        fetchScopedProducts({ category_id: cat.id, direct: 1 }),
+        loadSubcats(cat.id),
+      ]);
       setDirectCategoryProducts(direct);
     } catch { setDirectCategoryProducts([]); }
-    await loadSubcats(cat.id);
+    setStoreLoading(false);
     setStoreView("subcategories");
     // storeLoading=false يحدث داخل loadSubcats
   };
@@ -946,15 +963,11 @@ const AdminElementsPage = React.forwardRef<AdminElementsPageHandle, any>(({categ
       // عن الواجهة رغم تطابق منطق الفرز، لأن مصدر البيانات نفسه كان قديماً. الآن نجبر إعادة
       // الجلب (force=true) في كل مرة يفتح الأدمن فيها هذا المستوى، لضمان مطابقة تامة دائماً
       // لآخر ترتيب محفوظ فعلياً في القاعدة.
-      const [subRes, all] = await Promise.all([
+      const [subRes, direct] = await Promise.all([
         fetch(`/api/subcategories/${subcat.id}/sub-sub-categories?admin=1`).then(r => r.json()).catch(() => []),
-        ensureAllProducts(true),
+        fetchScopedProducts({ subcategory_id: subcat.id, direct: 1 }),
       ]);
       const subList = Array.isArray(subRes) ? subRes : [];
-      const direct = all.filter((p: any) =>
-        String(p.subcategory_id) === String(subcat.id) &&
-        (p.sub_sub_category_id === null || p.sub_sub_category_id === undefined || p.sub_sub_category_id === "")
-      );
       setDirectSubcatProducts(direct);
 
       if (subList.length > 0) {
@@ -1390,8 +1403,7 @@ const AdminElementsPage = React.forwardRef<AdminElementsPageHandle, any>(({categ
                           // بدون تحديث الصفحة، ما يسبب ظهور خانات/بيانات قديمة لا تعكس آخر حفظ)
                           let freshItem = item;
                           try {
-                            const all = await ensureAllProducts(true);
-                            const found = all.find((p: any) => String(p.id) === String(item.id));
+                            const found = await fetchOneProduct(item.id);
                             if (found) freshItem = found;
                           } catch { /* استخدام النسخة المحلية عند فشل الجلب */ }
                           let parsedImageUrls: string[] = [];

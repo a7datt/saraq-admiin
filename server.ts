@@ -1342,7 +1342,7 @@ async function renderStoreEditPriceListPage(bot: TelegramBot, chatId: number, pa
     await bot.sendMessage(chatId, "⛔ لا تملك صلاحية هذا الإجراء.");
     return;
   }
-  const { data: items } = await supabase.from("products").select("id, name, price").order("id");
+  const items = await fetchAllRowsPaged((f, t) => supabase.from("products").select("id, name, price").order("id").range(f, t));
   const list = items || [];
   const totalPages = Math.max(1, Math.ceil(list.length / STORE_EDIT_PRICE_PER_PAGE));
   const safePage = Math.min(Math.max(0, page), totalPages - 1);
@@ -1488,11 +1488,11 @@ async function renderStoreInventoryPage(bot: TelegramBot, chatId: number, page: 
     await bot.sendMessage(chatId, "⛔ لا تملك صلاحية هذا القسم.");
     return;
   }
-  const { data: products } = await supabase
+  const products = await fetchAllRowsPaged((f, t) => supabase
     .from("products")
     .select("id, name, inventory_group_id")
     .not("inventory_group_id", "is", null)
-    .order("name");
+    .order("name").order("id").range(f, t));
   const list = products || [];
   const totalPages = Math.max(1, Math.ceil(list.length / STORE_INVENTORY_PER_PAGE));
   const safePage = Math.min(Math.max(0, page), totalPages - 1);
@@ -2603,10 +2603,12 @@ async function getProviderForProduct(productId: number): ReturnType<typeof getPr
  */
 async function syncInventoryProductsAvailability(filter: { subcategory_id?: any; sub_sub_category_id?: any } = {}): Promise<void> {
   try {
-    let query = supabase.from("products").select("id, inventory_group_id, available").eq("store_type", "inventory").not("inventory_group_id", "is", null);
-    if (filter.subcategory_id) query = query.eq("subcategory_id", filter.subcategory_id);
-    if (filter.sub_sub_category_id) query = query.eq("sub_sub_category_id", filter.sub_sub_category_id);
-    const { data: invProducts } = await query;
+    const invProducts = await fetchAllRowsPaged((f, t) => {
+      let query: any = supabase.from("products").select("id, inventory_group_id, available").eq("store_type", "inventory").not("inventory_group_id", "is", null);
+      if (filter.subcategory_id) query = query.eq("subcategory_id", filter.subcategory_id);
+      if (filter.sub_sub_category_id) query = query.eq("sub_sub_category_id", filter.sub_sub_category_id);
+      return query.order("id", { ascending: true }).range(f, t);
+    });
     if (!invProducts || invProducts.length === 0) return;
 
     for (const p of invProducts) {
@@ -4227,6 +4229,22 @@ async function startServer() {
     return false;
   };
 
+  // [PERF] يحمّل صلاحيات التوكن مرة واحدة ثم يفحص كل منتج في الذاكرة (بدل عدة استعلامات لكل منتج —
+  // كان ذلك يُبطئ قائمة المنتجات جداً وقد ينهار مع آلاف المنتجات).
+  const getTokenAllowanceChecker = async (tokenId: number | string): Promise<(p: any) => boolean> => {
+    const { data: tokenRow } = await supabase.from("api_tokens").select("scope").eq("id", tokenId).maybeSingle();
+    if (tokenRow?.scope === "all") return () => true;
+    const prodRows = await fetchAllRowsPaged((f, t) => supabase.from("api_token_products").select("product_id").eq("token_id", tokenId).order("id").range(f, t));
+    const catRows = await fetchAllRowsPaged((f, t) => supabase.from("api_token_categories").select("category_type, category_id").eq("token_id", tokenId).order("id").range(f, t));
+    const prods = new Set(prodRows.map((r: any) => String(r.product_id)));
+    const cats = new Set(catRows.map((r: any) => `${r.category_type}:${r.category_id}`));
+    return (p: any) =>
+      prods.has(String(p.id)) ||
+      (!!p.sub_sub_category_id && cats.has(`sub_sub_category:${p.sub_sub_category_id}`)) ||
+      (!!p.subcategory_id && cats.has(`subcategory:${p.subcategory_id}`)) ||
+      (!!p?.subcategories?.category_id && cats.has(`category:${p.subcategories.category_id}`));
+  };
+
   // ═══ إعدادات الـ API العامة (Public API Settings) ═══
   // كل الإعدادات تُخزَّن في جدول settings العام (key/value) بنفس نمط باقي الإعدادات في المشروع
   const PUBLIC_API_SETTINGS_KEYS = [
@@ -4553,12 +4571,23 @@ async function startServer() {
       // المُصفّح، أي قسم/قسم فرعي تقع منتجاته بعد الصف الألف يظهر فارغاً في "عناصر
       // المتجر" رغم وجود منتجاته فعلياً بقاعدة البيانات، وهذا بالضبط ما لاحظه صاحب
       // المتجر بعد تجاوزه 10,000 منتج.
+      // [PERF] فلاتر اختيارية (id / category_id / subcategory_id / sub_sub_category_id / direct=1) كي تجلب
+      // لوحة "عناصر المتجر" منتجات القسم المفتوح فقط بدل كل المنتجات (آلاف الصفوف) عند كل نقرة.
+      // direct=1: مع category_id => منتجات القسم المباشرة (بلا قسم فرعي)، ومع subcategory_id => بلا فرع فرعي.
+      const qf = req.query as any;
+      const fid = (v: any) => (isValidId(v) ? v : null);
+      const fId = fid(qf.id), fCat = fid(qf.category_id), fSub = fid(qf.subcategory_id), fSubSub = fid(qf.sub_sub_category_id);
+      const fDirect = qf.direct === "1" || qf.direct === "true";
       const fetchAllProducts = (withOrderIndex: boolean) =>
         fetchAllRowsPaged((from, to) => {
-          let q = supabase
+          let q: any = supabase
             .from("products")
             .select("*, subcategories(name, category_id, categories(name))")
             .range(from, to);
+          if (fId) q = q.eq("id", fId);
+          if (fSubSub) q = q.eq("sub_sub_category_id", fSubSub);
+          if (fSub) { q = q.eq("subcategory_id", fSub); if (fDirect) q = q.is("sub_sub_category_id", null); }
+          if (fCat && !fSub) { q = q.eq("category_id", fCat); if (fDirect) q = q.is("subcategory_id", null); }
           q = withOrderIndex
             ? q.order("order_index", { ascending: true }).order("id", { ascending: true })
             : q.order("id", { ascending: true });
@@ -5198,18 +5227,15 @@ async function startServer() {
   app.get("/api/sub-sub-categories/:id/products", async (req, res) => {
     try {
       await syncInventoryProductsAvailability({ sub_sub_category_id: req.params.id });
-      let { data, error } = await supabase
-        .from("products")
-        .select("*")
-        .eq("sub_sub_category_id", req.params.id)
-        .order("order_index", { ascending: true })
-        .order("id", { ascending: true });
-      // عمود order_index قد لا يكون موجوداً بعد — أعد المحاولة بترتيب ثابت بالـ id لتفادي ترتيب عشوائي
-      if (error && (error as any).code === "42703") {
-        const fallback = await supabase.from("products").select("*").eq("sub_sub_category_id", req.params.id).order("id", { ascending: true });
-        data = fallback.data; error = fallback.error;
+      // [FIX-PAGINATION] جلب مُصفّح (حدّ 1000 صف)
+      let data: any[];
+      try {
+        data = await fetchAllRowsPaged((f, t) => supabase.from("products").select("*").eq("sub_sub_category_id", req.params.id)
+          .order("order_index", { ascending: true }).order("id", { ascending: true }).range(f, t));
+      } catch (err: any) {
+        if (err?.code !== "42703") throw err;
+        data = await fetchAllRowsPaged((f, t) => supabase.from("products").select("*").eq("sub_sub_category_id", req.params.id).order("id", { ascending: true }).range(f, t));
       }
-      if (error) throw error;
       res.json(Array.isArray(data) ? data : []);
     } catch (e: any) {
       safeError(res, e, undefined, req);
@@ -6937,16 +6963,23 @@ async function startServer() {
     try {
       const tokenId = (req as any).apiTokenId;
       const { products_id, base } = req.query as any;
-      let query = supabase.from("products").select("*, subcategories(name, category_id, categories(name))");
-      if (products_id) {
-        const ids = String(products_id).split(",").map((s) => s.trim()).filter(Boolean);
-        if (ids.length) query = query.in("id", ids);
+      const idList = products_id ? String(products_id).split(",").map((x) => x.trim()).filter(Boolean) : [];
+      const mkQuery = () => {
+        let q: any = supabase.from("products").select("*, subcategories(name, category_id, categories(name))");
+        if (idList.length) q = q.in("id", idList);
+        return q;
+      };
+      // [FIX-PAGINATION] جلب مُصفّح: حدّ PostgREST 1000 صف كان يُسقط المنتجات بعد الألف من قائمة الـ API
+      let data: any[] = [];
+      try {
+        data = await fetchAllRowsPaged((f, t) => mkQuery().order("order_index", { ascending: true }).order("id", { ascending: true }).range(f, t));
+      } catch (err: any) {
+        if (err?.code !== "42703") throw err;
+        data = await fetchAllRowsPaged((f, t) => mkQuery().order("id", { ascending: true }).range(f, t));
       }
-      const { data, error } = await query;
-      if (error) throw error;
 
-      const checks = await Promise.all((data || []).map((p: any) => isProductAllowedForToken(tokenId, p.id)));
-      const allowed = (data || []).filter((_: any, i: number) => checks[i]);
+      const isAllowed = await getTokenAllowanceChecker(tokenId);
+      const allowed = (data || []).filter((p: any) => isAllowed(p));
       const apiDiscountFor = await getApiDiscountResolver(tokenId);
       res.json({ status: "OK", data: allowed.map((p: any) => mapProductForClientApi(p, !!base, apiDiscountFor(p))) });
     } catch (e: any) {
@@ -6960,11 +6993,17 @@ async function startServer() {
       const categoryId = req.params.categoryId;
 
       const { data: subSubCategories } = await supabase.from("sub_sub_categories").select("*").eq("subcategory_id", categoryId).order("order_index");
-      const { data: products } = await supabase
-        .from("products").select("*, subcategories(name, category_id, categories(name))").eq("subcategory_id", categoryId);
+      const mkContentQuery = () => supabase.from("products").select("*, subcategories(name, category_id, categories(name))").eq("subcategory_id", categoryId);
+      let products: any[] = [];
+      try {
+        products = await fetchAllRowsPaged((f, t) => mkContentQuery().order("order_index", { ascending: true }).order("id", { ascending: true }).range(f, t));
+      } catch (err: any) {
+        if (err?.code !== "42703") throw err;
+        products = await fetchAllRowsPaged((f, t) => mkContentQuery().order("id", { ascending: true }).range(f, t));
+      }
 
-      const checks = await Promise.all((products || []).map((p: any) => isProductAllowedForToken(tokenId, p.id)));
-      const allowedProducts = (products || []).filter((_: any, i: number) => checks[i]);
+      const isAllowedContent = await getTokenAllowanceChecker(tokenId);
+      const allowedProducts = (products || []).filter((p: any) => isAllowedContent(p));
       const apiDiscountFor = await getApiDiscountResolver(tokenId);
 
       res.json({
@@ -11537,7 +11576,7 @@ ${userContext}
   app.get("/api/admin/analytics/filters", async (req, res) => {
     try {
       const { data: categories } = await supabase.from("categories").select("id, name").order("order_index");
-      const { data: providersRaw } = await supabase.from("products").select("provider_id").not("provider_id", "is", null);
+      const providersRaw = await fetchAllRowsPaged((f, t) => supabase.from("products").select("provider_id").not("provider_id", "is", null).order("id").range(f, t));
       const providerIds = Array.from(new Set((providersRaw || []).map((p: any) => p.provider_id).filter(Boolean)));
       res.json({
         categories: categories || [],
@@ -13179,9 +13218,8 @@ ${responseText}`);
       subcategoryIds = [...new Set(subcategoryIds)];
       if (subcategoryIds.length === 0) return res.status(400).json({ error: "لا توجد أقسام فرعية ضمن النطاق المختار" });
 
-      const { data: products, error: prodErr } = await supabase
-        .from("products").select("id, price_per_unit, store_type").in("subcategory_id", subcategoryIds);
-      if (prodErr) throw prodErr;
+      const products = await fetchAllRowsPaged((f, t) => supabase
+        .from("products").select("id, price_per_unit, store_type").in("subcategory_id", subcategoryIds).order("id").range(f, t));
 
       const apiProducts = (products || []).filter((p: any) => p.store_type === "external_api");
       let updated = 0;
@@ -13472,22 +13510,16 @@ ${responseText}`);
    */
   app.get("/api/admin/name-verification/bulk-candidates", adminAuth, async (req, res) => {
     try {
-      let { data, error } = await supabase
-        .from("products")
-        .select("id,name,image_url,available,requires_input,custom_fields,category_id,subcategory_id,sub_sub_category_id,name_verification_enabled,name_verification_game,name_verification_region,order_index,subcategories(name,category_id,categories(name))")
-        .order("order_index", { ascending: true })
-        .order("id", { ascending: true });
-
-      // عمود order_index قد لا يكون موجوداً في قواعد بيانات لم تُطبَّق عليها الترحيلات بعد
-      if (error && (error as any).code === "42703") {
-        const fallback = await supabase
-          .from("products")
-          .select("id,name,image_url,available,requires_input,custom_fields,category_id,subcategory_id,sub_sub_category_id,name_verification_enabled,name_verification_game,name_verification_region,subcategories(name,category_id,categories(name))")
-          .order("id", { ascending: true });
-        data = fallback.data as any;
-        error = fallback.error;
+      const NV_COLS = "id,name,image_url,available,requires_input,custom_fields,category_id,subcategory_id,sub_sub_category_id,name_verification_enabled,name_verification_game,name_verification_region,order_index,subcategories(name,category_id,categories(name))";
+      let data: any[];
+      try {
+        data = await fetchAllRowsPaged((f, t) => supabase.from("products").select(NV_COLS)
+          .order("order_index", { ascending: true }).order("id", { ascending: true }).range(f, t));
+      } catch (err: any) {
+        // عمود order_index قد لا يكون موجوداً في قواعد بيانات لم تُطبَّق عليها الترحيلات بعد
+        if (err?.code !== "42703") throw err;
+        data = await fetchAllRowsPaged((f, t) => supabase.from("products").select(NV_COLS).order("id", { ascending: true }).range(f, t));
       }
-      if (error) throw error;
 
       // sub_sub_categories جدول منفصل بلا علاقة nested تلقائية مع products، فنجلب أسماءه دفعة واحدة
       // ونربطها يدوياً بـ sub_sub_category_id — يلزم لعرض المستوى الثالث (فرع فرعي) في شاشة الاختيار الجماعي
@@ -14619,7 +14651,8 @@ ${responseText}`);
 
       // Helper: safely delete multiple products by field
       const safeDeleteProductsBy = async (field: string, value: any) => {
-        const { data: prods } = await supabase.from("products").select("id").eq(field, value);
+        // [FIX-PAGINATION] كل المعرّفات صفحةً بعد صفحة (حدّ 1000) — وإلا يبقى جزء من المنتجات عند حذف قسم كبير
+        const prods = await fetchAllRowsPaged((f, t) => supabase.from("products").select("id").eq(field, value).order("id").range(f, t));
         if (!prods || prods.length === 0) return;
         for (const p of prods) await safeDeleteProduct(p.id);
       };
@@ -14656,7 +14689,7 @@ ${responseText}`);
           if (subsubs && subsubs.length > 0) {
             const subsubIds = subsubs.map((ss: any) => ss.id);
             await safeDeleteProductsByIds(
-              (await supabase.from("products").select("id").in("sub_sub_category_id", subsubIds)).data?.map((p: any) => p.id) || []
+              (await fetchAllRowsPaged((f, t) => supabase.from("products").select("id").in("sub_sub_category_id", subsubIds).order("id").range(f, t))).map((p: any) => p.id)
             );
             await supabase.from("sub_sub_categories").delete().in("id", subsubIds);
           }
@@ -14674,7 +14707,7 @@ ${responseText}`);
         if (subsubs && subsubs.length > 0) {
           const subsubIds = subsubs.map((ss: any) => ss.id);
           await safeDeleteProductsByIds(
-            (await supabase.from("products").select("id").in("sub_sub_category_id", subsubIds)).data?.map((p: any) => p.id) || []
+            (await fetchAllRowsPaged((f, t) => supabase.from("products").select("id").in("sub_sub_category_id", subsubIds).order("id").range(f, t))).map((p: any) => p.id)
           );
           await supabase.from("sub_sub_categories").delete().in("id", subsubIds);
         }
@@ -15730,8 +15763,7 @@ ${responseText}`);
   // /clear-db و/import-db، وكان في السابق يقبل أي حساب أدمن مصادَق (حتى مسؤول ثانوي بلا صلاحيات).
   app.post("/api/admin/migrate/fix-default-account-key", requireMainAdmin, async (req, res) => {
     try {
-      const { data: products, error } = await supabase.from("products").select("id, custom_fields").eq("store_type", "quantities");
-      if (error) throw error;
+      const products = await fetchAllRowsPaged((f, t) => supabase.from("products").select("id, custom_fields").eq("store_type", "quantities").order("id").range(f, t));
       let updated = 0;
       for (const p of products || []) {
         if (!p.custom_fields) continue;
@@ -15805,12 +15837,22 @@ ${responseText}`);
     const provider = await getProvider(providerId);
     if (!provider) return { updated, unavailable, restored, errors };
 
-    const { data: dbProducts } = await supabase
-      .from("products")
-      .select("id, external_id, available, price, price_per_unit, min_quantity, max_quantity, package_values, package_type, markup_type, markup_value")
-      .eq("store_type", "external_api")
-      .eq("provider_id", providerId)
-      .not("external_id", "is", null);
+    // [FIX-PAGINATION] كان الاستعلام بلا ترقيم صفحات، فيُرجع PostgREST أول 1000 منتج فقط للمزوّد، وبالتالي
+    // لا تُحدَّث أسعار/توفر أي منتج بعد الألف تلقائياً. الآن تُجلب كل المنتجات صفحة بعد صفحة (1000 لكل صفحة).
+    let dbProducts: any[] = [];
+    try {
+      dbProducts = await fetchAllRowsPaged((f, t) => supabase
+        .from("products")
+        .select("id, external_id, available, price, price_per_unit, min_quantity, max_quantity, package_values, package_type, markup_type, markup_value")
+        .eq("store_type", "external_api")
+        .eq("provider_id", providerId)
+        .not("external_id", "is", null)
+        .order("id", { ascending: true })
+        .range(f, t));
+    } catch (e: any) {
+      console.error(`[AUTO-SYNC] فشل جلب منتجات المزوّد #${providerId}:`, e?.message || e);
+      return { updated, unavailable, restored, errors: errors + 1, errorMessage: String(e?.message || e) };
+    }
 
     if (!dbProducts?.length) return { updated, unavailable, restored, errors };
 
