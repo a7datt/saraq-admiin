@@ -3010,6 +3010,18 @@ async function persistProviderOrderMethod(providerId: number, orderMethod: "GET"
   }
 }
 
+// [ORDER-FIX] تصنيف خطأ المزود عند إنشاء الطلب: أخطاء بيانات العميل (Player ID/الكمية) تُرفض فوراً ويُعاد
+// الرصيد، أما أي خطأ من جهة المزود (رصيد API غير كافٍ، صيانة، توكن، اتصال، رد غير مفهوم) فيُحوَّل الطلب إلى
+// "معلّق" بانتظار الأدمن مع حفظ السبب الدقيق — ولا يُعرض للعميل أي تفاصيل عن رصيدنا لدى المزود.
+function isCustomerInputProviderError(code: any, msg: any): boolean {
+  const c = Number(code);
+  if ([105, 106, 112, 113, 114].includes(c)) return true;
+  if (c) return false;
+  const m = String(msg || "");
+  if (/رصيد|balance|insufficient|fund|كاف|صيانة|maintenance|token|توكن|\bip\b|timeout|مهلة|network|اتصال|server|خادم|unavailable|غير متاح/i.test(m)) return false;
+  return /player|معرف|اللاعب|ايدي|آيدي|\bid\b|account|الحساب|invalid|غير صالح|غير صحيح|الكمية|quantity|\bqty\b/i.test(m);
+}
+
 async function providerCreateOrder(
   base_url: string,
   api_token: string,
@@ -6744,12 +6756,17 @@ async function startServer() {
           if (!megaRes || megaRes.error === true) {
             const errMsg = megaRes?.message || "فشل الطلب لدى المورد";
             console.error(`[PROVIDER:${provider.name}] (megaapi) Order failed:`, JSON.stringify(megaRes));
-            return { ok: false, statusCode: 400, error: `فشل الطلب: ${errMsg}`, details: megaRes };
-          }
+            if (isCustomerInputProviderError(0, errMsg)) {
+              return { ok: false, statusCode: 400, error: `فشل الطلب: ${errMsg}`, details: megaRes };
+            }
+            providerOrderFailed = true;
+            providerFailReason = errMsg;
+          } else {
           ahminixOrderId     = String(megaRes.data?.order_number || ahminixOrderUuid);
           ahminixOrderStatus = megaRes.data?.status || "processing";
           ahminixReplayApi   = []; // Fast API لا تُرجع أكواد التفعيل عند الإنشاء — تصل لاحقاً عبر فحص الحالة
           console.log(`[PROVIDER:${provider.name}] (megaapi) Order created: id=${ahminixOrderId}, uuid=${ahminixOrderUuid}, status=${ahminixOrderStatus}`);
+          }
         } else {
         const providerExtraParams = buildProviderExtraParams(product, extraData);
         console.log(`[PROVIDER:${provider.name}] Creating order: ext_id=${product.external_id}, qty=${qty}, playerId="${playerId}", extraParams=${JSON.stringify(providerExtraParams)}, uuid=${ahminixOrderUuid}`);
@@ -6785,8 +6802,8 @@ async function startServer() {
           const errMsg = (code && errorCodes[code]) || ahminixRes?.message || ahminixRes?.error || "فشل الطلب لدى المورد";
           console.error(`[PROVIDER:${provider.name}] Order failed:`, JSON.stringify(ahminixRes));
 
-          if (code === 100) {
-            // رصيد API غير كافٍ: لا نُفشل الطلب، بل نحوّله لطلب معلّق ينتظر موافقة الإدارة يدوياً
+          if (!isCustomerInputProviderError(code, errMsg)) {
+            // خطأ من جهة المزود (رصيد API، صيانة، توكن، اتصال…): لا نُفشل الطلب، بل نحوّله لطلب معلّق ينتظر موافقة الإدارة يدوياً
             providerOrderFailed = true;
             providerFailReason = errMsg;
           } else {
@@ -7029,7 +7046,7 @@ async function startServer() {
           status: initialStatus,
           price: total,
           productName: product.name,
-          ...(providerOrderFailed ? { providerFailed: true, providerFailReason } : {}),
+          ...(providerOrderFailed ? { providerFailed: true } : {}),
           ...(ahminixOrderId ? {
             externalOrderId: ahminixOrderId,
             externalStatus: ahminixOrderStatus,
@@ -12199,8 +12216,9 @@ ${responseText}`);
             console.log(`[ADMIN APPROVE][${approveProvider.name}] (megaapi) Sending: ext_id=${product.external_id} | qty=${qty} | fields=${JSON.stringify(megaFields)} | uuid=${orderUuid}`);
             const megaRes = await megaApiCreateOrder(approveProvider.base_url, approveProvider.api_token, String(product.external_id).trim(), qty, megaFields, orderUuid);
             // تحويل غلاف Fast API ({error,message,data}) لنفس شكل {status:"OK"/غيره, data, message} المستخدم أدناه
-            apiRes = megaRes?.error === true
-              ? { status: "FAIL", message: megaRes?.message }
+            const megaFailed = !megaRes || ((megaRes.error === true || megaRes.err === true) && !megaRes?.data?.order_number);
+            apiRes = megaFailed
+              ? { status: "FAIL", message: megaRes?.message || "لا يوجد رد من المزود (تحقق من الاتصال/الرابط)" }
               : { status: "OK", data: { order_id: megaRes?.data?.order_number, status: megaRes?.data?.status, replay_api: [] } };
           } else {
           const approveExtraParams = buildProviderExtraParams(product, { ...itemExtraParsed, ...metaParsed });
@@ -12213,7 +12231,9 @@ ${responseText}`);
             qty,
             playerId,
             orderUuid,
-            approveExtraParams
+            approveExtraParams,
+            approveProvider.order_method || "POST",
+            approveProvider.id
           );
           }
 
