@@ -17479,14 +17479,16 @@ async function startBots(isHotRestart: boolean = false) {
             const ordId = ordMatch[1];
             const { data: order } = await supabase.from("orders").select("*").eq("id", ordId).single();
             if (order) {
+              // [BOT-PARITY] نفس منطق لوحة التحكم تماماً: القبول يُرسل الطلب للمزوّد (إن كان مرتبطاً بـ API)
+              // ويُبقيه معلّقاً مع السبب الدقيق إن فشل، والرفض يُرجع رصيد العميل ويعكس عمولة الوكيل.
               if (text === "تم") {
-                await supabase.from("orders").update({ status: "accepted" }).eq("id", ordId);
-                const { data: user } = await supabase.from("users").select("telegram_chat_id").eq("id", order.user_id).single();
-                if (user?.telegram_chat_id) userBot?.sendMessage(user.telegram_chat_id, `✅ تم قبول طلبك #${ordId}`);
-                adminBot!.sendMessage(chatId, `✅ تم قبول الطلب #ORD${ordId}`);
+                const r = await callOrderStatusEndpoint(ordId, "approved");
+                adminBot!.sendMessage(chatId, r.success
+                  ? `✅ تم قبول الطلب #ORD${ordId}${r.finalStatus ? ` — الحالة: ${r.finalStatus}` : ""}`
+                  : `⚠️ لم يُقبل الطلب #ORD${ordId} وبقي معلّقاً.\nالسبب: ${r.error}`);
               } else if (text === "رفض") {
-                await supabase.from("orders").update({ status: "rejected" }).eq("id", ordId);
-                adminBot!.sendMessage(chatId, `❌ تم رفض الطلب #ORD${ordId}`);
+                const r = await callOrderStatusEndpoint(ordId, "rejected");
+                adminBot!.sendMessage(chatId, r.success ? `❌ تم رفض الطلب #ORD${ordId} وإرجاع الرصيد للعميل` : `⚠️ تعذّر رفض الطلب #ORD${ordId}: ${r.error}`);
               } else {
                 await supabase.from("orders").update({ admin_response: text }).eq("id", ordId);
                 const { data: user } = await supabase.from("users").select("telegram_chat_id").eq("id", order.user_id).single();
