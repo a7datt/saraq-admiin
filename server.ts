@@ -1997,121 +1997,34 @@ function botAuthFail(chatId: number, max = 5, lockMin = 15): boolean {
 }
 const botOtpLastSent = new Map<string, number>();
 
-// --- Process Bot Order (Supabase) ---
-async function processBotOrder(chatId: number, user: any, product: any, price: number, extraData: any, quantity: number = 1, baseTotal?: number) {
+// --- Process Bot Order ---
+// [BOT-PARITY] طلبات البوت تمر الآن عبر createOrderCore نفسه المستخدم في الموقع: حجز ذرّي للرصيد، الخصومات،
+// وضع القبول التلقائي (إرسال فوري للمزوّد)، تحويل أخطاء المزوّد لطلب معلّق، المخزون، العمولات، وإشعار الأدمن.
+let botOrderCore: ((userId: any, productId: any, quantity: any, extraData: any, source: "user" | "external_api" | "bot", req: any) => Promise<any>) | null = null;
+async function processBotOrder(chatId: number, user: any, product: any, _price: number, extraData: any, quantity: number = 1, _baseTotal?: number) {
   try {
-    // [BOT-PARITY] إعادة قراءة المستخدم: فحص الحظر (كالموقع) + أحدث VIP/رتبة، ثم إعادة حساب السعر النهائي
-    // من السيرفر بنفس منطق الموقع (ويُستهلك خصم "المنتج الواحد" هنا فقط).
-    {
-      const { data: freshU } = await supabase.from("users").select("*").eq("id", user.id).single();
-      if (freshU) user = freshU;
-      const banState = await checkAndClearBan(user);
-      if (banState.banned || user.is_blocked) {
-        userBot?.sendMessage(chatId, `❌ ${banState.message || "حسابك موقوف. تواصل مع الدعم."}`);
-        return;
-      }
-      if (typeof baseTotal === "number" && baseTotal >= 0) {
-        price = (await botFinalPrice(user, product, baseTotal, true)).final;
-      }
-    }
-    const safeQty = Math.max(1, Math.floor(Number(quantity) || 1));
-    const { data: order, error: orderErr } = await supabase.from("orders").insert({
-      user_id: user.id,
-      total_amount: price,
-      meta: JSON.stringify(extraData)
-    }).select().single();
-
-    if (orderErr) throw orderErr;
-
-    // حفظ سعر التكلفة لحظة الشراء لضمان صحة حساب الأرباح لاحقاً
-    const botCostPrice = parseFloat(String(product.price_per_unit || 0)) || 0;
-    await supabase.from("order_items").insert({
-      order_id: order.id,
-      product_id: product.id,
-      price_at_purchase: product.price,
-      quantity: safeQty,
-      extra_data: JSON.stringify({ ...extraData, cost_price: botCostPrice })
-    });
-
-    // =================== [SECURITY FIX] خصم رصيد ذرّي (Compare-And-Swap) ===================
-    // نفس ثغرة Race Condition (TOCTOU — CWE-362) الموجودة سابقاً في createOrderCore، وهنا
-    // النافذة الزمنية للتلاعب أوسع بكثير: كائن `user` قد يكون قُرئ قبل عدة خطوات محادثة
-    // (انتظار إدخال المستخدم لبيانات المنتج)، فقد يتغيّر رصيده الفعلي كثيراً في هذه الأثناء.
-    // الإصلاح: إعادة قراءة الرصيد الحالي والتحقق من كفايته، ثم تحديث ذرّي مشروط
-    // (UPDATE ... WHERE balance = القيمة المقروءة للتو) مع إعادة محاولة عند التعارض.
-    let botDebited = false;
-    for (let attempt = 0; attempt < 5 && !botDebited; attempt++) {
-      const { data: freshUser, error: freshErr } = await supabase
-        .from("users").select("balance").eq("id", user.id).single();
-      if (freshErr || !freshUser) break;
-      const freshBalance = Number(freshUser.balance);
-      if (freshBalance < price) {
-        await supabase.from("orders").update({ status: "cancelled", admin_response: "الرصيد غير كافٍ عند التنفيذ الفعلي" }).eq("id", order.id);
-        userBot?.sendMessage(chatId, "❌ رصيدك غير كافٍ لإتمام هذا الطلب. تم إلغاء الطلب ولم يُخصم أي رصيد.");
-        return;
-      }
-      const { data: casRows, error: casErr } = await supabase
-        .from("users")
-        .update({ balance: freshBalance - price })
-        .eq("id", user.id)
-        .eq("balance", freshBalance) // شرط الذرّية — يمنع التزامن من خصم رصيد أقل من المطلوب
-        .select("id");
-      if (!casErr && Array.isArray(casRows) && casRows.length > 0) { botDebited = true; break; }
-    }
-    if (!botDebited) {
-      await supabase.from("orders").update({
-        status: "pending_admin",
-        admin_response: "تعذّر خصم الرصيد بعد عدة محاولات (تعارض طلبات متزامنة) — يتطلب مراجعة يدوية"
-      }).eq("id", order.id);
-      logSecurityEvent("bot-order-balance-cas-failed", { path: "/telegram-bot", method: "BOT", headers: {}, socket: {} } as any, `userId:${user.id} orderId:${order.id} price:${price}`);
-      notifyAdmins("system_alerts", `⚠️ تعذّر خصم رصيد طلب البوت #ORD${order.id} تلقائياً بسبب تعارض طلبات متزامنة. يتطلب مراجعة يدوية فورية.`);
-      userBot?.sendMessage(chatId, "⚠️ تعذّر إتمام العملية بسبب ضغط طلبات متزامن، تم تعليق الطلب لمراجعة الإدارة.");
+    if (!botOrderCore) { userBot?.sendMessage(chatId, "⚠️ الخدمة قيد التشغيل، حاول بعد لحظات."); return; }
+    const botReq = { path: "/telegram-bot", method: "BOT", headers: { "user-agent": "telegram-bot" }, socket: {}, ip: "telegram-bot" } as any;
+    const r = await botOrderCore(user.id, product.id, quantity || 1, extraData || {}, "bot", botReq);
+    if (!r?.ok) {
+      userBot?.sendMessage(chatId, `❌ ${r?.error || "تعذّر إتمام الطلب، حاول مرة أخرى."}`);
       return;
     }
-    // ========================================================================================
-
-    // عمولة الإحالة = نسبة من صافي ربح الطلب (وليس من مبلغ الشراء)
-    if (user.referred_by_id) {
-      try {
-        const { data: refCommSetting1 } = await supabase.from("settings").select("value").eq("key", "referral_commission").single();
-        const refCommRate1 = (parseFloat(refCommSetting1?.value || "5") || 5) / 100;
-        const botCostForProfit = product?.store_type === "external_api" ? botCostPrice : 0;
-        const netProfit = computeOrderNetProfit(product, price, safeQty, botCostForProfit);
-        const commission = Math.round(netProfit * refCommRate1 * 10000) / 10000;
-        if (commission > 0) {
-          await supabase.rpc("increment_balance", { user_id_param: user.referred_by_id, amount_param: commission });
-          await supabase.from("transactions").insert({ user_id: user.referred_by_id, amount: commission, note: `عمولة إحالة (${Math.round(refCommRate1 * 100)}% من صافي ربح الطلب #${order.id})`, status: "approved" });
-        }
-      } catch (refErr) {
-        console.error(`[REFERRAL] فشل حساب/إضافة عمولة الإحالة لطلب البوت #${order.id}:`, refErr);
-      }
+    const b = r.body || {};
+    const priceTxt = Number(b.price || 0).toFixed(2);
+    let msg: string;
+    if (b.inventoryDelivered) {
+      msg = `✅ تمت عملية الشراء بنجاح!\nرقم الطلب: #${b.orderId}\nالمنتج: ${b.productName}\nالمبلغ المخصوم: ${priceTxt}$\n\n🎁 بيانات المنتج:\n${b.inventoryDelivered}`;
+    } else if (b.status === "completed") {
+      msg = `✅ تم تنفيذ طلبك!\nرقم الطلب: #${b.orderId}\nالمنتج: ${b.productName}\nالمبلغ المخصوم: ${priceTxt}$`;
+    } else if (b.pendingAdmin) {
+      msg = `⏳ تم استلام طلبك وهو قيد المراجعة.\nرقم الطلب: #${b.orderId}\nالمنتج: ${b.productName}\nالمبلغ المخصوم: ${priceTxt}$\n\nستصلك رسالة فور تنفيذه.`;
+    } else {
+      msg = `🚀 تم إرسال طلبك وهو قيد التنفيذ.\nرقم الطلب: #${b.orderId}\nالمنتج: ${b.productName}\nالمبلغ المخصوم: ${priceTxt}$\n\nستصلك رسالة فور اكتماله.`;
     }
-
-    // [AGENTS] عمولة الوكيل من صافي ربح الطلب
-    if (user.agent_id) {
-      const botCostForAgent = product?.store_type === "external_api" ? botCostPrice : 0;
-      await agentCore.applyAgentCommission({ orderId: order.id, buyerId: user.id, agentId: user.agent_id, netProfit: computeOrderNetProfit(product, price, safeQty, botCostForAgent) });
-    }
-
-    userBot?.sendMessage(chatId, `✅ تمت عملية الشراء بنجاح!\nرقم الطلب: ${order.id}\nالمنتج: ${product.name}\nالمبلغ المخصوم: ${price.toFixed(2)}$`);
-
-    const orderDateStr = order.created_at ? new Date(order.created_at).toLocaleString("ar-EG") : new Date().toLocaleString("ar-EG");
-    const extraDataStrBot = formatOrderExtraDataForBot(extraData);
-    const adminMsg = [
-      `🔔 طلب جديد من البوت #ORD${order.id}`,
-      "",
-      `👤 العميل: ${user.name}${userExtras.verifiedMark(user)}`,
-      `🔢 رقم الدخول: #${user.id}`,
-      `📦 المنتج: ${product.name} (#${product.id})`,
-      `💵 الإجمالي: ${price}`,
-      `📌 الحالة: ⏳ قيد المراجعة`,
-      `🗓️ التاريخ: ${orderDateStr}`,
-      `🌐 المصدر: 🤖 بوت تيليجرام (ليس API خارجي)`,
-      `📋 بيانات إضافية: ${extraDataStrBot}`,
-    ].join("\n");
-    notifyAdmins("new_orders", adminMsg, { reply_markup: { inline_keyboard: buildOrderNotifyActionRow(order.id) } }, { type: "order", id: order.id });
+    userBot?.sendMessage(chatId, msg);
   } catch (e) {
-    console.error(e);
+    console.error("[BOT ORDER]", e);
     userBot?.sendMessage(chatId, "❌ حدث خطأ أثناء معالجة الطلب.");
   }
 }
@@ -6571,14 +6484,20 @@ async function startServer() {
     } catch { return 0; }
   }
 
+  // [BOT-PARITY] createOrderCore — نسخة مطابقة حرفياً لمنطق الموقع (saraqib-user) باستثناء الإشعار المباشر
+  // لبوت الأدمن. يستخدمها: نسخة مسار الطلب هنا، الـ API الخارجي، وبوت المستخدمين (source="bot").
   async function createOrderCore(
     userId: number | string,
     productId: number | string,
     quantity: any,
     extraData: any,
-    source: "user" | "external_api",
+    source: "user" | "external_api" | "bot",
     req: any
   ): Promise<CreateOrderResult> {
+    // [SEC-FIX] CWE-460 خصم بلا إرجاع: يُضبط true فوراً بعد نجاح حجز الرصيد، ويُفحص
+    // في الـ catch الخارجي لإرجاع الرصيد تلقائياً إن انهارت أي خطوة لاحقة باستثناء غير متوقع.
+    let balanceReserved = false;
+    let total = 0;
     try {
       if (!isValidId(productId)) return { ok: false, statusCode: 400, error: "معرف المنتج غير صحيح" };
 
@@ -6656,11 +6575,7 @@ async function startServer() {
       } else {
         unitPrice = rawPrice;
       }
-      // [SECURITY FIX] نستخدم الكمية المُتحقَّق منها (safeQty) لا القيمة الخام (quantity) —
-      // القيمة الخام قد تكون كسرية (مثال: 5.9) فتُمرَّر لحساب السعر بينما فحوصات الحدود
-      // (productMinQty/productMaxQty) طُبِّقت على safeQty فقط، ما يفتح ثغرة تلاعب بسيطة
-      // بين الكمية المفوترة والكمية المرسلة فعلياً للمزود/المخزون.
-      let total = unitPrice * safeQty;
+      total = unitPrice * safeQty;
 
       const { data: stats } = await supabase.from("user_stats").select("*").eq("user_id", userId).single();
       // [PHASE-2] خصم VIP من محرك القواعد (قاعدة لكل قسم/قسم فرعي/فرع فرعي/منتج أو كل المنتجات).
@@ -6695,6 +6610,30 @@ async function startServer() {
 
       if (discountPercent > 0) total *= (1 - discountPercent / 100);
       if (user.balance < total) return { ok: false, statusCode: 400, error: "الرصيد غير كافٍ" };
+
+      // [SEC-FIX] Race Condition (CWE-362 / TOCTOU): كان الرصيد يُخصم لاحقاً عبر
+      // "update({ balance: user.balance - total })" بالاعتماد على قيمة user.balance المقروءة
+      // في بداية الدالة — بين تلك القراءة وتنفيذ الخصم توجد استدعاءات شبكة/DB متعددة (فحص
+      // المخزون، إنشاء الطلب لدى المزود الخارجي...) وهي نافذة كافية لتنفيذ طلبات متزامنة
+      // (منتجات/كميات مختلفة تتفادى فحص isDuplicateOrder) تقرأ جميعها نفس الرصيد القديم وتمرّ
+      // من فحص "الرصيد كافٍ" أعلاه، فيُسمح بشراء ما يفوق الرصيد الفعلي (Double-Spend).
+      // الإصلاح: نحجز المبلغ فوراً وبشكل ذرّي عبر دالة قاعدة بيانات واحدة تتحقق وتخصم في نفس
+      // العملية (راجع migrations/001_atomic_balance_deduction.sql). إن فشل الحجز، لا شيء
+      // تغيّر بعد (لم يُنشأ طلب بعد ولم يُطلب من أي مزود خارجي) فنرفض الطلب بأمان.
+      const { data: reserveRows, error: reserveErr } = await supabase.rpc("deduct_balance_if_sufficient", {
+        p_user_id: userId,
+        p_amount: total,
+      });
+      const reserved = Array.isArray(reserveRows) ? reserveRows[0] : reserveRows;
+      if (reserveErr || !reserved?.success) {
+        return { ok: false, statusCode: 409, error: "الرصيد غير كافٍ" };
+      }
+      balanceReserved = true; // [SEC-FIX] من هذه اللحظة أي استثناء غير متوقع يجب أن يُرجع هذا المبلغ
+      // دالة مساعدة لاسترجاع المبلغ المحجوز إن فشلت خطوة لاحقة بعد الحجز (تعويض/Compensation)
+      const refundReservedBalance = async () => {
+        try { await supabase.rpc("increment_balance", { user_id_param: userId, amount_param: total }); }
+        catch (e) { console.error(`[ORDER] فشل استرجاع رصيد محجوز لمستخدم ${userId} بقيمة ${total}`, e); }
+      };
 
       // =================== CHECK ORDER MODE (AUTO vs MANUAL) ===================
       // نقرأ وضع معالجة الطلبات من الإعدادات
@@ -6739,82 +6678,88 @@ async function startServer() {
         }
 
         ahminixOrderUuid = generateUUIDv4();
-        // [SECURITY FIX] استخدام safeQty الموثوقة بدل إعادة تفسير quantity الخام هنا
         // بعض المزودين (مثل طرطوسي) لديهم منتجات specificPackage حيث يجب أن تطابق qty
         // قيمة محددة بالضبط (قد تكون كسرية مثل 1.92)، لذا نرسل safeQty كما هو دون أي تقريب إضافي.
         const qty = safeQty;
 
+        const providerExtraParams = buildProviderExtraParams(product, extraData);
+        console.log(`[PROVIDER:${provider.name}] Creating order: ext_id=${product.external_id}, qty=${qty}, playerId="${playerId}", type=${provider.provider_type}, extraParams=${JSON.stringify(providerExtraParams)}, uuid=${ahminixOrderUuid}`);
+
         if (provider.provider_type === "megaapi") {
-          // [MEGAAPI] عقد مختلف جذرياً — دالة ومسار معزولان تماماً عن المزود القياسي
-          const megaOrderFields = buildMegaApiOrderFields(product, { ...extraData, playerId });
-          console.log(`[PROVIDER:${provider.name}] (megaapi) Creating order: ext_id=${product.external_id}, qty=${qty}, fields=${JSON.stringify(megaOrderFields)}, uuid=${ahminixOrderUuid}`);
-
+          const megaFields = buildMegaApiOrderFields(product, { ...extraData, playerId });
           const megaRes = await megaApiCreateOrder(
-            provider.base_url, provider.api_token, String(product.external_id).trim(), qty, megaOrderFields, ahminixOrderUuid
+            provider.base_url,
+            provider.api_token,
+            String(product.external_id).trim(),
+            qty,
+            megaFields,
+            ahminixOrderUuid
           );
-
-          if (!megaRes || megaRes.error === true) {
+          // طلب مكرر (نفس UUID): error=true لكن data.order_number موجود — نعامله كنجاح
+          const isMegaDuplicate = (megaRes?.error === true || megaRes?.err === true) && !!megaRes?.data?.order_number;
+          const isMegaError = !megaRes || ((megaRes.error === true || megaRes.err === true) && !megaRes?.data?.order_number);
+          if (isMegaError) {
             const errMsg = megaRes?.message || "فشل الطلب لدى المورد";
             console.error(`[PROVIDER:${provider.name}] (megaapi) Order failed:`, JSON.stringify(megaRes));
             if (isCustomerInputProviderError(0, errMsg)) {
+              await refundReservedBalance();
               return { ok: false, statusCode: 400, error: `فشل الطلب: ${errMsg}`, details: megaRes };
             }
             providerOrderFailed = true;
             providerFailReason = errMsg;
-          } else {
+          }
+          if (!providerOrderFailed) {
+          if (isMegaDuplicate) {
+            console.warn(`[PROVIDER:${provider.name}] (megaapi) Duplicate order UUID=${ahminixOrderUuid} — treating as success`);
+          }
           ahminixOrderId     = String(megaRes.data?.order_number || ahminixOrderUuid);
           ahminixOrderStatus = megaRes.data?.status || "processing";
-          ahminixReplayApi   = []; // Fast API لا تُرجع أكواد التفعيل عند الإنشاء — تصل لاحقاً عبر فحص الحالة
+          ahminixReplayApi   = [];
           console.log(`[PROVIDER:${provider.name}] (megaapi) Order created: id=${ahminixOrderId}, uuid=${ahminixOrderUuid}, status=${ahminixOrderStatus}`);
           }
         } else {
-        const providerExtraParams = buildProviderExtraParams(product, extraData);
-        console.log(`[PROVIDER:${provider.name}] Creating order: ext_id=${product.external_id}, qty=${qty}, playerId="${playerId}", extraParams=${JSON.stringify(providerExtraParams)}, uuid=${ahminixOrderUuid}`);
-
-        const ahminixRes = await providerCreateOrder(
-          provider.base_url,
-          provider.api_token,
-          String(product.external_id).trim(),
-          qty,
-          playerId,
-          ahminixOrderUuid,
-          providerExtraParams,
-          provider.order_method || "POST",
-          provider.id
-        );
-
-        if (!ahminixRes || ahminixRes.status !== "OK") {
-          const errorCodes: Record<number, string> = {
-            120: "رمز API مطلوب",
-            121: "خطأ في رمز API — تحقق من توكن المزود في لوحة التحكم",
-            122: "غير مسموح باستخدام API",
-            123: "عنوان IP غير مسموح به",
-            130: "الموقع قيد الصيانة",
-            100: "رصيد API غير كافٍ",
-            105: "الكمية غير متوفرة",
-            106: "الكمية غير مسموح بها",
-            112: "الكمية صغيرة جداً",
-            113: "الكمية كبيرة جداً",
-            114: "معلمة غير صالحة - تحقق من بيانات اللاعب أو الـ Player ID",
-            500: "خطأ غير معروف"
-          };
-          const code = ahminixRes?.code || ahminixRes?.error_code;
-          const errMsg = (code && errorCodes[code]) || ahminixRes?.message || ahminixRes?.error || "فشل الطلب لدى المورد";
-          console.error(`[PROVIDER:${provider.name}] Order failed:`, JSON.stringify(ahminixRes));
-
-          if (!isCustomerInputProviderError(code, errMsg)) {
-            // خطأ من جهة المزود (رصيد API، صيانة، توكن، اتصال…): لا نُفشل الطلب، بل نحوّله لطلب معلّق ينتظر موافقة الإدارة يدوياً
-            providerOrderFailed = true;
-            providerFailReason = errMsg;
+          const ahminixRes = await providerCreateOrder(
+            provider.base_url,
+            provider.api_token,
+            String(product.external_id).trim(),
+            qty,
+            playerId,
+            ahminixOrderUuid,
+            providerExtraParams,
+            provider.order_method || "POST",
+            provider.id
+          );
+          if (!ahminixRes || ahminixRes.status !== "OK") {
+            const errorCodes: Record<number, string> = {
+              120: "رمز API مطلوب",
+              121: "خطأ في رمز API — تحقق من توكن المزود في لوحة التحكم",
+              122: "غير مسموح باستخدام API",
+              123: "عنوان IP غير مسموح به",
+              130: "الموقع قيد الصيانة",
+              100: "رصيد API غير كافٍ",
+              105: "الكمية غير متوفرة",
+              106: "الكمية غير مسموح بها",
+              112: "الكمية صغيرة جداً",
+              113: "الكمية كبيرة جداً",
+              114: "معلمة غير صالحة - تحقق من بيانات اللاعب أو الـ Player ID",
+              500: "خطأ غير معروف"
+            };
+            const code = ahminixRes?.code || ahminixRes?.error_code;
+            const errMsg = (code && errorCodes[code]) || ahminixRes?.message || ahminixRes?.error || "فشل الطلب لدى المورد";
+            console.error(`[PROVIDER:${provider.name}] Order failed:`, JSON.stringify(ahminixRes));
+            if (!isCustomerInputProviderError(code, errMsg)) {
+              providerOrderFailed = true;
+              providerFailReason = errMsg;
+            } else {
+              await refundReservedBalance();
+              return { ok: false, statusCode: 400, error: `فشل الطلب: ${errMsg}`, details: ahminixRes };
+            }
           } else {
-            return { ok: false, statusCode: 400, error: `فشل الطلب: ${errMsg}`, details: ahminixRes };
+            ahminixOrderId   = String(ahminixRes.data?.order_id || ahminixOrderUuid);
+            ahminixOrderStatus = ahminixRes.data?.status || "processing";
+            ahminixReplayApi = normalizeReplayApi(ahminixRes.data?.replay_api);
+            console.log(`[PROVIDER:${provider.name}] Order created: id=${ahminixOrderId}, uuid=${ahminixOrderUuid}, status=${ahminixOrderStatus}, replay=${ahminixReplayApi.length}`);
           }
-        } else {
-          ahminixOrderId   = String(ahminixRes.data?.order_id || ahminixOrderUuid);
-          ahminixOrderStatus = ahminixRes.data?.status || "processing";
-          ahminixReplayApi = normalizeReplayApi(ahminixRes.data?.replay_api);
-          console.log(`[PROVIDER:${provider.name}] Order created: id=${ahminixOrderId}, uuid=${ahminixOrderUuid}, status=${ahminixOrderStatus}, replay=${ahminixReplayApi.length}`);
-        }
         }
       }
       // ====================================================================
@@ -6825,7 +6770,7 @@ async function startServer() {
         // فشل الطلب لدى المزود (مثلاً رصيد API غير كافٍ) — نحوّله لمعلّق بانتظار موافقة الإدارة يدوياً بدل رفضه
         initialStatus = 'pending_admin';
       } else if (hasExternalId && orderMode === 'auto') {
-        initialStatus = normalizeOrderStatus(ahminixOrderStatus) === 'completed' ? 'completed' : 'processing';
+        initialStatus = ahminixOrderStatus === 'accept' ? 'completed' : 'processing';
       } else if (hasExternalId && orderMode === 'manual') {
         initialStatus = 'pending_admin';
       } else if (product.store_type === 'external_api') {
@@ -6838,6 +6783,7 @@ async function startServer() {
 
       if (product.store_type === 'inventory') {
         if (!product.inventory_group_id) {
+          await refundReservedBalance();
           return { ok: false, statusCode: 400, error: "هذا المنتج غير مرتبط بمخزون. تواصل مع الدعم." };
         }
         const { count: availableCount } = await supabase
@@ -6847,15 +6793,14 @@ async function startServer() {
           .eq("status", "available");
         if (!availableCount || availableCount < 1) {
           await supabase.from("products").update({ available: false }).eq("id", productId);
+          await refundReservedBalance();
           return { ok: false, statusCode: 400, error: "نفذت الكمية من هذا المنتج حالياً" };
         }
       }
 
       // حفظ الطلب في قاعدة البيانات المحلية
-      // cost_price: سعر التكلفة لحظة الشراء — يُحفظ هنا ليُستخدم في حساب الأرباح حتى لو تغيّر لاحقاً.
-      // مهم: يُحفظ فقط لمنتجات external_api لأن price_per_unit هناك هو فعلاً سعر تكلفة المزوّد بالدولار.
-      // لأي نوع متجر آخر (وبالأخص "quantities" حيث price_per_unit = الكمية الأساسية وليس مبلغاً) يبقى 0،
-      // ومحرك الإحصائيات يعتمد عندها على default_profit للمنتج أو manual_profit المُدخل يدوياً على الطلب.
+      // cost_price: سعر التكلفة لحظة الشراء — يُحفظ هنا ليُستخدم في حساب الأرباح حتى لو تغيّر لاحقاً
+      // price_per_unit هو سعر تكلفة المزوّد فقط لمنتجات external_api؛ لباقي الأنواع (خصوصاً quantities) هو كمية لا مبلغ.
       const snapshotCostPrice = product.store_type === 'external_api'
         ? (parseFloat(String(product.price_per_unit || 0)) || 0)
         : 0;
@@ -6905,9 +6850,11 @@ async function startServer() {
           p_product_id: productId
         });
         if (rpcErr || !rpcResult || !rpcResult[0]) {
-          // نفدت الكمية بالضبط بين لحظة الفحص ولحظة التنفيذ: نلغي الطلب ونعيد الرصيد
+          // نفدت الكمية بالضبط بين لحظة الفحص ولحظة التنفيذ: نلغي الطلب ونعيد الرصيد المحجوز فعلياً
           await supabase.from("orders").update({ status: "cancelled", admin_response: "نفذت الكمية أثناء المعالجة" }).eq("id", order.id);
           await supabase.from("products").update({ available: false }).eq("id", productId);
+          // الطلب أُنشئ وخُصم رصيده فعلياً — نسترجع عبر الدالة الذرّية الوحيدة (idempotent)
+          await supabase.rpc("refund_order_once", { p_order_id: order.id });
           return { ok: false, statusCode: 409, error: "نفذت الكمية من هذا المنتج للتو. تم إلغاء الطلب ولم يُخصم أي رصيد." };
         }
         inventoryDeliveredContent = rpcResult[0].content;
@@ -6917,120 +6864,63 @@ async function startServer() {
       }
       // ====================================================================
 
-      // =================== [SECURITY FIX] خصم الرصيد بشكل ذرّي (Compare-And-Swap) ===================
-      // الكود القديم كان يخصم الرصيد بقراءة/كتابة غير ذرّية: `balance: user.balance - total`
-      // باستخدام قيمة user.balance المقروءة في بداية الدالة. هذا يفتح ثغرة Race Condition
-      // (TOCTOU — CWE-362): لو أرسل المستخدم عدة طلبات شراء متزامنة (مثلاً عبر سكربت)، كل الطلبات
-      // تقرأ نفس رصيد البداية وتجتاز فحص الكفاية (user.balance < total) بنجاح، ثم تكتب جميعها
-      // بناءً على نفس القيمة القديمة، فيُخصم رصيد أقل بكثير مما يجب — ما يسمح بشراء منتجات متعددة
-      // (أو مخزون فعلي) برصيد شخص واحد فقط (Balance Draining / Double-Spend).
-      // الإصلاح: تحديث ذرّي مشروط (UPDATE ... WHERE balance = <القيمة التي قرأناها>) — إن تغيّر
-      // الرصيد من طلب متزامن آخر بين القراءة والكتابة فإن هذا التحديث لن يطابق أي صف (0 rows)،
-      // فنُعيد قراءة الرصيد الفعلي ونعيد المحاولة (حتى 5 محاولات) بدل تنفيذ خصم غير صحيح.
-      let debited = false;
-      let insufficientAfterRace = false;
-      for (let attempt = 0; attempt < 5 && !debited; attempt++) {
-        const { data: freshUser, error: freshErr } = await supabase
-          .from("users").select("balance").eq("id", userId).single();
-        if (freshErr || !freshUser) break;
-        const freshBalance = Number(freshUser.balance);
-        if (freshBalance < total) { insufficientAfterRace = true; break; }
-        const { data: casRows, error: casErr } = await supabase
-          .from("users")
-          .update({ balance: freshBalance - total })
-          .eq("id", userId)
-          .eq("balance", freshBalance) // شرط الذرّية: ينجح فقط إن لم يتغيّر الرصيد منذ قراءته للتو
-          .select("id");
-        if (!casErr && Array.isArray(casRows) && casRows.length > 0) { debited = true; break; }
-        // فشل الشرط بسبب تعديل متزامن على نفس الصف (طلب/شحن آخر) — أعد المحاولة بقراءة جديدة
-      }
-      if (!debited) {
-        // تعارض شديد أو رصيد أصبح غير كافٍ فعلياً بسبب طلب متزامن آخر — لا نُكمل العملية
-        // (المنتج قد يكون تم تسليمه بالفعل عبر المخزون/المزود في هذه الحالة النادرة، لذا
-        // نجعل الطلب معلّقاً لمراجعة الإدارة يدوياً بدل إلغائه بصمت أو خصم رصيد خاطئ)
-        await supabase.from("orders").update({
-          status: "pending_admin",
-          admin_response: insufficientAfterRace
-            ? "تعذّر خصم الرصيد: أصبح غير كافٍ بسبب تعارض طلبات متزامنة — يتطلب مراجعة يدوية"
-            : "تعذّر خصم الرصيد بعد عدة محاولات (تعارض طلبات متزامنة) — يتطلب مراجعة يدوية"
-        }).eq("id", order.id);
-        logSecurityEvent("order-balance-cas-failed", req, `userId:${userId} orderId:${order.id} total:${total}`);
-        notifyAdmins("system_alerts", `⚠️ تعذّر خصم رصيد الطلب #ORD${order.id} تلقائياً بسبب تعارض طلبات متزامنة. يتطلب مراجعة يدوية فورية (تحقق من عدم تسليم المنتج بلا دفع).`);
-        return { ok: false, statusCode: 409, error: "تعذّر إتمام العملية بسبب ضغط طلبات متزامن، يرجى المحاولة مجدداً" };
-      }
+      // [SEC-FIX] الرصيد تم حجزه وخصمه بالفعل بشكل ذرّي أعلاه (deduct_balance_if_sufficient)
+      // قبل أي إجراء خارجي — لم نعد بحاجة لخصم إضافي هنا، والإبقاء عليه كان سيُسبب خصماً
+      // مضاعفاً غير صحيح بالاعتماد على قيمة user.balance القديمة.
       logActivity(userId, "order", `طلب شراء: ${product.name} بقيمة ${total}`, req);
-      // ====================================================================================
 
-      // عمولة الإحالة (ديناميكية من الإعدادات)
-      // [صمام أمان] هذه خطوة ثانوية تأتي بعد نجاح خصم رصيد العميل فعلياً (CAS أعلاه).
-      // فشلها (مثلاً DB بطيء مؤقتاً) لا يجب أن يُسقط استجابة النجاح للعميل — الطلب موجود
-      // فعلياً وتم الدفع، فقط عمولة المُحيل لم تُضف. نُسجّل الفشل وننبّه الأدمن بدل رمي 500.
+      // عمولة الإحالة = نسبة من صافي ربح الطلب (وليس من مبلغ الشراء ولا من الشحن)
       if (user.referred_by_id) {
-        const refResult = await safeExternalCall(
-          `referral-commission order:${order.id}`,
-          async () => {
-            const { data: refCommSetting2 } = await supabase.from("settings").select("value").eq("key", "referral_commission").single();
-            const refCommRate2 = (parseFloat(refCommSetting2?.value || "5") || 5) / 100;
-            // العمولة = نسبة من صافي ربح الطلب فقط (وليس من مبلغ الشراء ولا من الشحن)
-            const netProfit = computeOrderNetProfit(product, total, safeQty, snapshotCostPrice);
-            const commission = Math.round(netProfit * refCommRate2 * 10000) / 10000;
-            if (commission <= 0) return 0;
-            const { error: incErr } = await supabase.rpc("increment_balance", { user_id_param: user.referred_by_id, amount_param: commission });
-            if (incErr) throw incErr;
+        try {
+          const { data: refCommSetting2 } = await supabase.from("settings").select("value").eq("key", "referral_commission").single();
+          const refCommRate2 = (parseFloat(refCommSetting2?.value || "5") || 5) / 100;
+          const netProfit = computeOrderNetProfit(product, total, safeQty, snapshotCostPrice);
+          const commission = Math.round(netProfit * refCommRate2 * 10000) / 10000;
+          if (commission > 0) {
+            await supabase.rpc("increment_balance", { user_id_param: user.referred_by_id, amount_param: commission });
             await supabase.from("transactions").insert({ user_id: user.referred_by_id, amount: commission, note: `عمولة إحالة (${Math.round(refCommRate2 * 100)}% من صافي ربح الطلب #${order.id})`, status: "approved" });
-            return commission;
-          },
-          { req }
-        );
-        if (!refResult.ok) {
-          notifyAdmins("system_alerts", `⚠️ فشل إضافة عمولة إحالة للطلب #ORD${order.id} (المُحيل: #${user.referred_by_id}). يتطلب مراجعة يدوية.\nالسبب: ${refResult.error}`);
+          }
+        } catch (refErr) {
+          console.error(`[REFERRAL] فشل حساب/إضافة عمولة الإحالة للطلب #${order.id}:`, refErr);
         }
       }
 
-      // [AGENTS] عمولة الوكيل من صافي ربح الطلب
+      // [AGENTS] عمولة الوكيل = نسبة من صافي ربح المتجر في الطلب (مرة واحدة، تُعكس عند الاسترجاع)
       if (user.agent_id) {
         await agentCore.applyAgentCommission({ orderId: order.id, buyerId: userId, agentId: user.agent_id, netProfit: computeOrderNetProfit(product, total, safeQty, snapshotCostPrice) });
       }
 
-      // إشعار تلجرام (استدعاء واحد فقط لتفادي إرسال إشعارين مكررين لنفس الطلب)
-      const orderTypeLabel = providerOrderFailed ? '⚠️ طلب معلّق (فشل API)' : orderMode === 'auto' ? '🌐 طلب تلقائي' : '⏳ طلب ينتظر الموافقة';
-      const externalInfo = ahminixOrderId ? `\nرقم طلب المزود: ${ahminixOrderId}\nالحالة لدى المزود: ${ahminixOrderStatus}` : (providerOrderFailed ? `\nسبب التعليق: ${providerFailReason}` : '');
-      const sourceLabel = source === "external_api" ? "🔌 API خارجي (نظام طرف ثالث)" : "🌐 الموقع/البوت";
-      const orderDateStrApi = order.created_at ? new Date(order.created_at).toLocaleString("ar-EG") : new Date().toLocaleString("ar-EG");
-      const adminMsg = [
-        `${orderTypeLabel} #ORD${order.id}`,
+      // إشعار فوري للمستخدم إذا تم قبول الطلب لحظياً
+      if (ahminixOrderStatus === 'accept' && ahminixReplayApi?.length > 0) {
+        const { data: userTg } = await supabase.from("users").select("telegram_chat_id").eq("id", userId).single();
+        if (userTg?.telegram_chat_id && userBot) {
+          const codes = ahminixReplayApi.filter(Boolean);
+          userBot.sendMessage(
+            userTg.telegram_chat_id,
+            `✅ تم تنفيذ طلبك فوراً!\n\nالطلب: #ORD${order.id}\nالمنتج: ${product.name}\n\n🎁 بيانات التفعيل:\n${codes.join("\n")}`
+          ).catch(() => {});
+        }
+      }
+
+      // إشعار بوت الأدمن بالطلب الجديد (هذا السيرفر يملك بوت الأدمن مباشرة).
+      const orderTypeLabelUser = providerOrderFailed ? '⚠️ طلب معلّق (فشل API)' : orderMode === 'auto' ? '🌐 طلب تلقائي' : '⏳ طلب ينتظر الموافقة';
+      const externalInfoUser = ahminixOrderId ? `\nرقم طلب المزود: ${ahminixOrderId}\nالحالة لدى المزود: ${ahminixOrderStatus}` : (providerOrderFailed ? `\nسبب التعليق: ${providerFailReason}` : '');
+      const sourceLabelUser = source === "external_api" ? "🔌 API خارجي (نظام طرف ثالث)" : source === "bot" ? "🤖 بوت تيليجرام" : "🌐 الموقع";
+      const orderDateStrUser = order.created_at ? new Date(order.created_at).toLocaleString("ar-EG") : new Date().toLocaleString("ar-EG");
+      const extraDataStrUser = formatOrderExtraDataForBot(metaData);
+      const orderAdminMsg = [
+        `${orderTypeLabelUser} #ORD${order.id}`,
         "",
-        `👤 العميل: ${user.name}`,
+        `👤 العميل: ${user.name}${userExtras.verifiedMark(user)}`,
         `🔢 رقم الدخول: #${user.id}`,
         `📦 المنتج: ${product.name} (#${product.id})`,
         `💵 الإجمالي: ${total}`,
-        `📌 الحالة: ${initialStatus === 'pending_admin' ? '⏳ قيد المراجعة' : orderTypeLabel}`,
-        `🗓️ التاريخ: ${orderDateStrApi}`,
-        `🌐 المصدر: ${sourceLabel}`,
-        `📋 بيانات إضافية: ${formatOrderExtraDataForBot(metaData)}`,
-      ].join("\n") + `${externalInfo}${initialStatus === 'pending_admin' ? '\n\n⚠️ يحتاج موافقتك من لوحة التحكم' : ''}`;
-      notifyAdmins("new_orders", adminMsg, { reply_markup: { inline_keyboard: buildOrderNotifyActionRow(order.id) } }, { type: "order", id: order.id });
-
-      // إشعار فوري للمستخدم إذا تم قبول الطلب لحظياً
-      // [صمام أمان] استعلام + إرسال إشعار — غير حرج، الطلب أصلاً نجح ورجع للعميل بالـ response
-      // أدناه بغض النظر عن نجاح هذا الإشعار أو فشله.
-      if (ahminixOrderStatus === 'accept' && ahminixReplayApi?.length > 0) {
-        await safeExternalCall(
-          `instant-order-telegram-notify order:${order.id}`,
-          async () => {
-            const { data: userTg, error: userTgErr } = await supabase.from("users").select("telegram_chat_id").eq("id", userId).single();
-            if (userTgErr) throw userTgErr;
-            if (userTg?.telegram_chat_id && userBot) {
-              const codes = ahminixReplayApi.filter(Boolean);
-              await userBot.sendMessage(
-                userTg.telegram_chat_id,
-                `✅ تم تنفيذ طلبك فوراً!\n\nالطلب: #ORD${order.id}\nالمنتج: ${product.name}\n\n🎁 بيانات التفعيل:\n${codes.join("\n")}`
-              );
-            }
-          },
-          { req, silent: true } // فشل الإشعار وحده لا يستحق تسجيل خطأ صاخب بالسيرفر
-        );
-      }
+        `📌 الحالة: ${initialStatus === 'pending_admin' ? '⏳ قيد المراجعة' : orderTypeLabelUser}`,
+        `🗓️ التاريخ: ${orderDateStrUser}`,
+        `🌐 المصدر: ${sourceLabelUser}`,
+        `📋 بيانات إضافية: ${extraDataStrUser}`,
+      ].join("\n") + `${externalInfoUser}${initialStatus === 'pending_admin' ? '\n\n⚠️ يحتاج موافقتك من لوحة التحكم' : ''}`;
+      notifyAdmins("new_orders", orderAdminMsg, { reply_markup: { inline_keyboard: buildOrderNotifyActionRow(order.id) } }, { type: "order", id: order.id });
 
       if (source === "external_api") {
         triggerOrderWebhook(order.id, initialStatus).catch(() => {});
@@ -7058,9 +6948,32 @@ async function startServer() {
         }
       };
     } catch (e: any) {
-      return { ok: false, statusCode: 500, error: e?.message || "حدث خطأ داخلي", details: e };
+      // [FIX] لوغ مفصّل لسبب فشل إنشاء الطلب: الرسالة الحقيقية + تفاصيل الكائن (Supabase/PostgREST) + stack
+      const errMsg = e?.message || (typeof e === "object" ? JSON.stringify(e) : String(e));
+      console.error(
+        `[ORDER CREATE ERROR] ${new Date().toISOString()} | userId=${userId} productId=${productId}\n` +
+        `  → السبب: ${errMsg}` +
+        (e?.details || e?.hint || e?.code ? `\n  → تفاصيل: ${JSON.stringify({ details: e?.details, hint: e?.hint, code: e?.code })}` : "") +
+        (e?.stack ? `\n  → Stack:\n${e.stack}` : "")
+      );
+      // [SEC-FIX] خصم بلا إرجاع (money-loss): لو كان الرصيد قد خُصم قبل حدوث هذا الاستثناء
+      // (مثل TypeError: fetch failed عند الاتصال بالمزوّد) فالمسارات المُعالَجة أعلاه استدعت
+      // refundReservedBalance() بنفسها، لكن هذا المسار العام لم يكن يفعل ذلك — فيبقى الرصيد
+      // مخصوماً للأبد دون أي طلب ناجح يقابله.
+      if (balanceReserved) {
+        try {
+          await supabase.rpc("increment_balance", { user_id_param: userId, amount_param: total });
+          console.error(`[ORDER] تم إرجاع الرصيد المحجوز (${total}$) لمستخدم ${userId} بعد فشل غير متوقع`);
+        } catch (refundErr) {
+          console.error(`[ORDER] ❌ فشل إرجاع الرصيد المحجوز (${total}$) لمستخدم ${userId}! يتطلب تدخلاً يدوياً فورياً.`, refundErr);
+          notifyAdmins("system_alerts", `🚨 خصم رصيد بلا إرجاع — تدخل يدوي فوري مطلوب\nuserId=${userId} productId=${productId} amount=${total}$\nفشل إنشاء الطلب وفشل الإرجاع التلقائي أيضاً.`);
+        }
+        return { ok: false, statusCode: 500, error: errMsg ? "حدث خطأ غير متوقع، تم إرجاع رصيدك بالكامل. يرجى المحاولة مرة أخرى." : "فشل إنشاء الطلب، تم إرجاع رصيدك. يرجى المحاولة مرة أخرى." };
+      }
+      return { ok: false, statusCode: 500, error: errMsg || "فشل إنشاء الطلب، يرجى المحاولة مرة أخرى", details: e };
     }
   }
+  botOrderCore = createOrderCore; // [BOT-PARITY] إتاحة المنطق نفسه لبوت المستخدمين
 
   function isOrderError(r: CreateOrderResult): r is Extract<CreateOrderResult, { ok: false }> {
     return r.ok === false;
