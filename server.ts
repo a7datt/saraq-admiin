@@ -885,6 +885,7 @@ async function renderOrderDetail(bot: TelegramBot, chatId: number, orderId: stri
     `👤 العميل: ${userName}`,
     `🔢 رقم الدخول: #${order.user_id}`,
     `📦 المنتج: ${productName}`,
+    `🔢 الكمية: ${order.order_items?.[0]?.quantity ?? "—"}`,
     `💵 الإجمالي: ${order.total_amount}`,
     `📌 الحالة: ${orderStatusLabel(order)}`,
     `🗓️ التاريخ: ${dateStr}`,
@@ -1716,7 +1717,7 @@ async function callOrderStatusEndpoint(
 // [نظام إشعارات ذكي] نص موجز نهائي يستبدل إشعار الطلب الأصلي بعد البت به (قبول/رفض/تعديل)
 // حتى لا يبقى الإشعار القديم بأزرار نشطة قابلة للضغط عليها من جديد بالخطأ.
 async function buildOrderNotificationSummary(orderId: string | number): Promise<string> {
-  const { data: order } = await supabase.from("orders").select("id, status, user_id, total_amount, admin_response, users(name)").eq("id", orderId).maybeSingle();
+  const { data: order } = await supabase.from("orders").select("id, status, user_id, total_amount, admin_response, users(name), order_items(quantity)").eq("id", orderId).maybeSingle();
   if (!order) return `📦 الطلب #${orderId} — ❓ تعذّر جلب الحالة الحالية.`;
   const userName = (order as any).users?.name || "مستخدم محذوف";
   // [FIX-ROOT-CAUSE] نفس إصلاح renderOrderDetail: عرض ID اللاعب المعدَّل المعلَّق (إن وُجد)
@@ -1726,6 +1727,7 @@ async function buildOrderNotificationSummary(orderId: string | number): Promise<
     `📦 طلب #ORD${order.id} (مُحدَّث)`,
     "",
     `👤 العميل: ${userName} (#${order.user_id})`,
+    `🔢 الكمية: ${(order as any).order_items?.[0]?.quantity ?? "—"}`,
     `💵 الإجمالي: ${order.total_amount}`,
     `📌 الحالة الحالية: ${orderStatusLabel(order)}`,
     order.admin_response ? `💬 آخر رد: ${order.admin_response}` : "",
@@ -6914,6 +6916,7 @@ async function startServer() {
         `👤 العميل: ${user.name}${userExtras.verifiedMark(user)}`,
         `🔢 رقم الدخول: #${user.id}`,
         `📦 المنتج: ${product.name} (#${product.id})`,
+        `🔢 الكمية: ${safeQty}`,
         `💵 الإجمالي: ${total}`,
         `📌 الحالة: ${initialStatus === 'pending_admin' ? '⏳ قيد المراجعة' : orderTypeLabelUser}`,
         `🗓️ التاريخ: ${orderDateStrUser}`,

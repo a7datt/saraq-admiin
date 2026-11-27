@@ -253,6 +253,7 @@ export function buildOrderShareRows(order: any, extra?: { providerName?: string;
     { label: "رقم الدخول", value: String(order.user_db_id ?? order.user_id ?? "—") },
     { label: "المنتج", value: order.product_name || "—" },
     { label: "القسم", value: [order.category_name, order.subcategory_name].filter(Boolean).join(" ← ") || "—" },
+    { label: "الكمية", value: String(order.order_items?.[0]?.quantity ?? meta.quantity ?? "—") },
     { label: "السعر", value: `${Number(extra?.price ?? order.total_amount ?? order.total_price ?? 0).toFixed(3)} $` },
     { label: "الحالة", value: statusLabelAr(order.status) },
     { label: "تاريخ الإنشاء", value: new Date(order.created_at).toLocaleString("ar-EG") },

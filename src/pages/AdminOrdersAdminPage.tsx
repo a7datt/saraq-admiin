@@ -531,6 +531,14 @@ const AdminOrdersAdminPage = ({adminOrders, orderSearch, setOrderSearch, orderDa
   ];
 
   const getPriceValue = (order: any) => Number(order.total_amount || order.total_price || 0);
+  // الكمية المطلوبة: من order_items (المصدر الأساسي) ثم meta كاحتياط
+  const getQty = (order: any): number | null => {
+    const q = Number(order.order_items?.[0]?.quantity);
+    if (Number.isFinite(q) && q > 0) return q;
+    try { const m = JSON.parse(order.meta || "{}"); const mq = Number(m?.quantity ?? m?.qty); if (Number.isFinite(mq) && mq > 0) return mq; } catch {}
+    return null;
+  };
+  const fmtQty = (q: number) => q.toLocaleString("en-US", { maximumFractionDigits: 6 });
   const getProviderName = (order: any) =>
     order.provider_name ||
     order.order_items?.[0]?.products?.provider_name ||
@@ -913,6 +921,10 @@ const AdminOrdersAdminPage = ({adminOrders, orderSearch, setOrderSearch, orderDa
                     <span className="font-bold text-gray-700">{providerName}</span>
                     <span className="text-gray-300">·</span>
                     <span className="font-bold text-gray-700">{price.toFixed(3)} $</span>
+                    {getQty(order) !== null && (<>
+                      <span className="text-gray-300">·</span>
+                      <span className="font-black text-[var(--brand)] bg-blue-50 rounded px-1.5 py-0.5">الكمية: {fmtQty(getQty(order)!)}</span>
+                    </>)}
                   </div>
                   <button
                     type="button"
@@ -1094,6 +1106,10 @@ const AdminOrdersAdminPage = ({adminOrders, orderSearch, setOrderSearch, orderDa
                     </div>
                     <div className="flex items-center gap-2 mt-0.5">
                       <p className="text-xs font-bold text-[var(--brand)]">{getPriceValue(order).toFixed(3)} $</p>
+                      {getQty(order) !== null && (<>
+                        <span className="text-gray-300 text-xs">·</span>
+                        <span className="text-xs font-black text-gray-700 shrink-0">الكمية: {fmtQty(getQty(order)!)}</span>
+                      </>)}
                       <span className="text-gray-300 text-xs">·</span>
                       <span className="text-xs font-bold text-gray-500 truncate">{getProviderName(order)}</span>
                       <button
@@ -1141,6 +1157,7 @@ const AdminOrdersAdminPage = ({adminOrders, orderSearch, setOrderSearch, orderDa
                     <div className="grid grid-cols-2 gap-2 text-xs">
                       {order.category_name && <div className="bg-white rounded-md p-2.5 border border-gray-100"><p className="text-[9px] text-gray-400 mb-0.5">القسم الرئيسي</p><p className="font-bold text-gray-700">{order.category_name}</p></div>}
                       {order.subcategory_name && <div className="bg-white rounded-md p-2.5 border border-gray-100"><p className="text-[9px] text-gray-400 mb-0.5">القسم الفرعي</p><p className="font-bold text-gray-700">{order.subcategory_name}</p></div>}
+                      {getQty(order) !== null && <div className="bg-white rounded-md p-2.5 border border-gray-100"><p className="text-[9px] text-gray-400 mb-0.5">الكمية</p><p className="font-black text-gray-800">{fmtQty(getQty(order)!)}</p></div>}
                       {order.order_items?.[0]?.products?.store_type && <div className="bg-white rounded-md p-2.5 border border-gray-100"><p className="text-[9px] text-gray-400 mb-0.5">نوع المتجر</p><p className="font-bold text-gray-700">{order.order_items[0].products.store_type}</p></div>}
                       <div className="bg-white rounded-md p-2.5 border border-gray-100">
                         <p className="text-[9px] text-gray-400 mb-0.5">المزود</p>
