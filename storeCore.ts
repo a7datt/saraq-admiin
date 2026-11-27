@@ -165,6 +165,7 @@ export function createStoreCore(supabase: any) {
       if (ownerType === "rank") await supabase.from("ranks").update({ discount_percent: maxPct }).eq("id", ownerId);
       else if (ownerType === "vip") await supabase.from("settings").upsert({ key: "vip_discount", value: String(maxPct) }, { onConflict: "key" });
       else if (ownerType === "api_global") await supabase.from("settings").upsert({ key: "public_api_discount_percent", value: String(allPct) }, { onConflict: "key" });
+      else if (ownerType === "api_user") await supabase.from("api_tokens").update({ custom_discount_percent: null }).eq("user_id", ownerId);
     } catch { /* مزامنة اختيارية */ }
 
     // تحذير الخسارة

@@ -24,6 +24,8 @@ export function createBotPricing(supabase: any) {
           pct = Math.max(pct, resolveDiscountPercent(await loadDiscountRules(supabase, "rank", userRow.rank_id), prod).percent);
         }
       }
+      // [USER-RULES] قواعد خصم المتجر الخاصة بهذا المستخدم
+      if (userRow?.id != null) pct = Math.max(pct, resolveDiscountPercent(await loadDiscountRules(supabase, "user", userRow.id), prod).percent);
       const { data: stats } = await supabase.from("user_stats")
         .select("*").eq("user_id", userRow.id).maybeSingle(); // select("*") كالموقع (بعض الأعمدة اختيارية وقد لا توجد)
       if (stats) {

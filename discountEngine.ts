@@ -2,13 +2,15 @@
  * [PHASE-2] محرك قواعد الخصم الموحّد (Discount Rules Engine)
  * ---------------------------------------------------------------------------
  * نسخة مطابقة تماماً في مستودعَي saraqib-user و saraqib-admin (حافظ على تطابقهما).
- * كل قاعدة = (مالك، نطاق، نسبة). المالك: rank (رتبة) | vip | api_global.
+ * كل قاعدة = (مالك، نطاق، نسبة). المالك: rank (رتبة) | vip | api_global | api_user (خصم API لمستخدم) | user (خصم متجر لمستخدم).
  * النطاق: all | category | subcategory | sub_sub_category | product.
  * عند التعارض تُطبَّق قاعدة واحدة فقط: الأدق (منتج > فرع فرعي > فرعي > رئيسي > كل المنتجات).
  * حماية الخسارة: إن عُرفت تكلفة المنتج لا تُترك النسبة تُنزل السعر تحت التكلفة.
  */
 
-export type DiscountOwnerType = "rank" | "vip" | "api_global";
+export type DiscountOwnerType = "rank" | "vip" | "api_global" | "api_user" | "user";
+/** المالكون الذين يحتاجون معرّفاً (رتبة أو مستخدم) */
+export const OWNER_NEEDS_ID: Record<DiscountOwnerType, boolean> = { rank: true, vip: false, api_global: false, api_user: true, user: true };
 export type DiscountScopeType = "all" | "category" | "subcategory" | "sub_sub_category" | "product";
 
 export interface DiscountRule {
@@ -102,6 +104,11 @@ export function resolveDiscountPercent(rules: DiscountRule[], product: any): { p
   let capped = false;
   if (cap !== null && pct > cap) { pct = cap; capped = true; }
   return { percent: pct, rule, capped, cap };
+}
+
+/** قواعد أساسية تتفوّق إن انطبقت إحداها على المنتج، وإلا تُطبَّق القواعد الاحتياطية (مثل: خصم API للمستخدم ← العام). */
+export function resolveWithFallback(primary: DiscountRule[], fallback: DiscountRule[], product: any) {
+  return pickMostSpecificRule(primary, product) ? resolveDiscountPercent(primary, product) : resolveDiscountPercent(fallback, product);
 }
 
 /** تحقق/تنظيف قواعد واردة من الأدمن. يرمي Error برسالة عربية عند أي خلل. */

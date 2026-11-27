@@ -30,7 +30,7 @@ export interface AdminExtrasDeps {
 }
 
 type PickerMode = "dsc" | "bpf";
-interface DscSession { ownerType: "rank" | "vip" | "api_global"; ownerId: number | null; title: string; rules: any[]; names: Record<string, string> }
+interface DscSession { ownerType: "rank" | "vip" | "api_global" | "api_user" | "user"; ownerId: number | null; title: string; rules: any[]; names: Record<string, string> }
 interface PickerSession { mode: PickerMode; want: ScopeType }
 interface BpfSession { scopes: { scope_type: ScopeType; scope_id: number | null; label: string }[]; op: "increase" | "decrease" | "set"; type: "percent" | "fixed"; value: number | null; lastPreview?: number }
 
@@ -194,7 +194,8 @@ export function createAdminExtras(d: AdminExtrasDeps) {
     const { data: ranks } = await supabase.from("ranks").select("id, name").order("sort_order", { ascending: true });
     const kb: any[][] = [
       [{ text: "💎 خصم VIP", callback_data: cb("dsc", "own", "vip", 0) }],
-      [{ text: "🔌 خصم الـ API", callback_data: cb("dsc", "own", "api_global", 0) }],
+      [{ text: "🔌 خصم الـ API (عام)", callback_data: cb("dsc", "own", "api_global", 0) }],
+      [{ text: "👤 خصم مستخدم معيّن (متجر / API)", callback_data: cb("dsc", "usr") }],
       ...(ranks || []).map((r: any) => [{ text: `🏅 رتبة: ${clip(r.name, 24)}`, callback_data: cb("dsc", "own", "rank", r.id) }]),
       home,
     ];
@@ -433,13 +434,22 @@ export function createAdminExtras(d: AdminExtrasDeps) {
         await ack();
         if (act === "home") { dsc.delete(chatId); await discountsHome(chatId, mid); }
         else if (act === "own") {
-          const ownerType = a as any; const ownerId = ownerType === "rank" ? Number(c) : null;
-          let title = ownerType === "vip" ? "قواعد خصم VIP" : ownerType === "api_global" ? "قواعد خصم الـ API" : "قواعد خصم الرتبة";
+          const ownerType = a as any; const ownerId = (ownerType === "rank" || ownerType === "user" || ownerType === "api_user") ? Number(c) : null;
+          let title = ownerType === "vip" ? "قواعد خصم VIP" : ownerType === "api_global" ? "قواعد خصم الـ API (عام)" : "قواعد خصم الرتبة";
           if (ownerType === "rank") { const { data: r } = await supabase.from("ranks").select("name").eq("id", ownerId).maybeSingle(); title = `قواعد خصم رتبة «${r?.name || ownerId}»`; }
+          if (ownerType === "user" || ownerType === "api_user") {
+            const { data: u } = await supabase.from("users").select("name").eq("id", ownerId).maybeSingle();
+            if (!u) { await send(chatId, "❌ المستخدم غير موجود.", [back(cb("dsc", "home"))], mid); return true; }
+            title = ownerType === "user" ? `قواعد خصم المتجر الخاصة بـ ${u.name} (#${ownerId})` : `قواعد خصم الـ API الخاصة بـ ${u.name} (#${ownerId}) — تتفوّق على العامة إن انطبقت`;
+          }
           dsc.set(chatId, { ownerType, ownerId, title, rules: [], names: {} });
           await discountsOwner(chatId, mid);
         }
         else if (act === "refresh") { await discountsOwner(chatId, mid); }
+        else if (act === "usr") {
+          d.states.set(chatId, { step: "x_dsc_uid", data: {} });
+          await send(chatId, "👤 أرسل رقم الدخول (ID) للمستخدم:", [back(cb("dsc", "home"))], mid);
+        }
         else if (act === "add") { await pickerStart(chatId, "dsc", mid); }
         else if (act === "del") {
           const s = dsc.get(chatId); if (!s) return true;
@@ -556,6 +566,19 @@ export function createAdminExtras(d: AdminExtrasDeps) {
         done();
         if (!data || data.length === 0) { d.states.set(chatId, { step: "x_pk_search", data: {} }); await b.sendMessage(chatId, "لا نتائج. جرّب كلمة أخرى:"); return true; }
         await b.sendMessage(chatId, "اختر المنتج:", { reply_markup: { inline_keyboard: [...data.map((p: any) => [{ text: clip(p.name, 40), callback_data: cb("pk", "sel", "product", p.id) }]), back(cb("pk", "start"))] } });
+        return true;
+      }
+      if (state.step === "x_dsc_uid") {
+        const uid = Number(text.replace("#", ""));
+        if (!Number.isInteger(uid) || uid <= 0) { await b.sendMessage(chatId, "❌ رقم غير صحيح، أرسل رقم الدخول:"); return true; }
+        const { data: u } = await supabase.from("users").select("id, name").eq("id", uid).maybeSingle();
+        if (!u) { await b.sendMessage(chatId, "❌ لا يوجد مستخدم بهذا الرقم، أعد الإرسال:"); return true; }
+        done();
+        await b.sendMessage(chatId, `👤 ${u.name} (#${u.id})\nاختر نوع الخصم:`, { reply_markup: { inline_keyboard: [
+          [{ text: "🛒 خصم المتجر الخاص (الموقع والبوت والـ API)", callback_data: cb("dsc", "own", "user", u.id) }],
+          [{ text: "🔌 خصم الـ API الخاص", callback_data: cb("dsc", "own", "api_user", u.id) }],
+          back(cb("dsc", "home")),
+        ] } });
         return true;
       }
       if (state.step === "x_dsc_pct") {

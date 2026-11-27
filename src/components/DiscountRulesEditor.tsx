@@ -5,7 +5,7 @@ import DiscountScopePicker, { ScopeSel, ScopeType, scopeTypeLabel } from "./Disc
 
 interface Props {
   adminFetch: (url: string, options?: RequestInit) => Promise<Response>;
-  ownerType: "rank" | "vip" | "api_global";
+  ownerType: "rank" | "vip" | "api_global" | "api_user" | "user";
   ownerId?: number | null;
   /** عنوان توضيحي يظهر أعلى المحرر */
   hint?: string;

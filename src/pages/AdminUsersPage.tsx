@@ -1,5 +1,7 @@
 import React from "react";
 import OptimizedImage from "../components/OptimizedImage";
+import DiscountRulesEditor from "../components/DiscountRulesEditor";
+import { showToast } from "../components/ToastContainer";
 import {
   Users, Search, X, Crown, Lock, Trash2,
   Bell, MessageCircle, Wallet, ShoppingBag, Send,
@@ -73,6 +75,7 @@ const AdminUsersPage = ({
 
   // إعدادات الـ API الخاصة بالمستخدم (نسبة خصم مخصصة + تفعيل/تعطيل)
   const [apiDiscountPanelId, setApiDiscountPanelId] = React.useState<number | null>(null);
+  const [storeDiscountPanelId, setStoreDiscountPanelId] = React.useState<number | null>(null); // [USER-RULES]
   const [apiTokenInfo, setApiTokenInfo] = React.useState<Record<number, any>>({});
   const [apiLoading, setApiLoading] = React.useState<number | null>(null);
   const [apiDiscountVal, setApiDiscountVal] = React.useState("");
@@ -483,7 +486,11 @@ const AdminUsersPage = ({
                     </button>
                     <button onClick={() => { setApiDiscountPanelId(apiDiscountPanelId === u.id ? null : u.id); setApiError(null); loadApiToken(u.id); }}
                       className="flex items-center justify-center gap-1 bg-teal-50 text-teal-700 py-2 rounded-md text-[11px] font-bold active:scale-95 border border-teal-100">
-                      <Percent size={11}/> نسبة خصم API
+                      <Percent size={11}/> قواعد خصم API
+                    </button>
+                    <button onClick={() => setStoreDiscountPanelId(storeDiscountPanelId === u.id ? null : u.id)}
+                      className="flex items-center justify-center gap-1 bg-amber-50 text-amber-700 py-2 rounded-md text-[11px] font-bold active:scale-95 border border-amber-100">
+                      <Percent size={11}/> خصم المتجر الخاص
                     </button>
                     <button onClick={() => toggleApiEnabled(u.id)}
                       className={`flex items-center justify-center gap-1 py-2 rounded-md text-[11px] font-bold active:scale-95 border ${apiTokenInfo[u.id]?.enabled === false ? "bg-green-50 text-green-700 border-green-100" : "bg-gray-100 text-gray-600 border-gray-200"}`}>
@@ -535,30 +542,40 @@ const AdminUsersPage = ({
                     )}
                     {apiLoading === u.id ? (
                       <p className="text-center text-xs text-gray-400 py-2">جاري التحميل...</p>
-                    ) : !apiTokenInfo[u.id]?.exists ? (
-                      <p className="text-center text-[11px] text-gray-400 py-2">لا يملك هذا المستخدم مفتاح API بعد</p>
                     ) : (
                       <>
-                        <p className="text-[11px] font-bold text-teal-700">نسبة خصم API مخصصة لـ {u.name} (تُطبَّق بدل النسبة العامة بصفحة API)</p>
-                        <div className="flex gap-2">
-                          <input
-                            type="number" min={0} max={99} step={0.1}
-                            placeholder="اتركه فارغاً لاستخدام النسبة العامة"
-                            value={apiDiscountVal}
-                            onChange={e => setApiDiscountVal(e.target.value)}
-                            className="flex-1 p-2 bg-white rounded-md text-xs outline-none border border-teal-200 text-center font-bold"
-                          />
-                          <button disabled={apiSaving} onClick={() => saveApiDiscount(u.id)}
-                            className="bg-teal-600 text-white px-3 rounded-md text-xs font-bold active:scale-95 disabled:opacity-50">
-                            حفظ
-                          </button>
-                          <button onClick={() => setApiDiscountPanelId(null)} className="bg-gray-100 text-gray-600 px-2.5 rounded-md text-xs font-bold active:scale-95"><X size={12}/></button>
+                        <div className="flex items-center justify-between">
+                          <p className="text-[11px] font-black text-teal-700">قواعد خصم طلبات الـ API لـ {u.name}</p>
+                          <button onClick={() => setApiDiscountPanelId(null)} className="bg-gray-100 text-gray-600 p-1.5 rounded-md active:scale-95"><X size={12}/></button>
                         </div>
-                        {apiTokenInfo[u.id]?.custom_discount_percent != null && (
-                          <p className="text-[10px] text-teal-600 font-bold">النسبة الحالية المطبّقة: {apiTokenInfo[u.id]?.custom_discount_percent}%</p>
+                        {!apiTokenInfo[u.id]?.exists && (
+                          <p className="text-[10px] text-amber-600 bg-amber-50 rounded-md px-2 py-1.5">لا يملك هذا المستخدم مفتاح API بعد — القواعد تُحفظ وتُطبَّق فور إنشائه للمفتاح.</p>
                         )}
+                        <DiscountRulesEditor
+                          adminFetch={adminFetch}
+                          ownerType="api_user"
+                          ownerId={u.id}
+                          hint="تُطبَّق على أسعار وطلبات الـ API لهذا المستخدم فقط. إن انطبقت إحدى قواعده على المنتج تتفوّق على القواعد العامة بصفحة API، وإلا تُطبَّق القواعد العامة. عند التعارض تُطبَّق الأدق: منتج ← فرع فرعي ← قسم فرعي ← قسم رئيسي ← كل المنتجات (لا تُجمع النسب)."
+                          onSaved={() => setApiTokenInfo(prev => { const n = { ...prev }; delete n[u.id]; return n; })}
+                        />
                       </>
                     )}
+                  </div>
+                )}
+
+                {/* [USER-RULES] قواعد خصم المتجر الخاصة بالمستخدم (الموقع + البوت + الـ API) */}
+                {storeDiscountPanelId === u.id && (
+                  <div className="border-t border-amber-100 bg-amber-50/40 px-3 py-2.5 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[11px] font-black text-amber-700">قواعد خصم المتجر الخاصة بـ {u.name}</p>
+                      <button onClick={() => setStoreDiscountPanelId(null)} className="bg-gray-100 text-gray-600 p-1.5 rounded-md active:scale-95"><X size={12}/></button>
+                    </div>
+                    <DiscountRulesEditor
+                      adminFetch={adminFetch}
+                      ownerType="user"
+                      ownerId={u.id}
+                      hint="خصم خاص بهذا المستخدم على مشترياته من الموقع والبوت والـ API. إن كان لديه خصم آخر (VIP أو رتبة…) تُطبَّق النسبة الأعلى فقط ولا تُجمع. عند التعارض بين قواعده تُطبَّق الأدق: منتج ← فرع فرعي ← قسم فرعي ← قسم رئيسي ← كل المنتجات."
+                    />
                   </div>
                 )}
 

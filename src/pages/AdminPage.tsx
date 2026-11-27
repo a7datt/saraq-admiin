@@ -5211,7 +5211,7 @@ export default function AdminPage({
                 </div>
                 <div className="bg-blue-50 rounded-lg p-4 space-y-3">
                   <h4 className="font-bold text-sm text-blue-700 flex items-center gap-2"><Star size={14}/>نسبة عمولة الإحالة</h4>
-                  <p className="text-xs text-gray-500">النسبة المئوية التي يحصل عليها المستخدم من كل شحنة يجريها من أحاله</p>
+                  <p className="text-xs text-gray-500">النسبة المئوية التي يحصل عليها المُحيل من صافي ربح المتجر في كل عملية شراء يقوم بها من أحاله (وليس من الشحن)</p>
                   <div className="flex gap-2 items-center">
                     <input type="number" min="0" max="100" step="0.5" value={referralCommissionVal} onChange={e => setReferralCommissionVal(e.target.value)} className="flex-1 p-3 bg-white rounded-lg text-sm outline-none border border-blue-100 text-center font-bold" placeholder="مثال: 10" />
                     <span className="text-gray-500 font-bold text-lg">%</span>

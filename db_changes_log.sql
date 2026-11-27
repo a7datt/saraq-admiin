@@ -343,3 +343,16 @@ ALTER TABLE public.agents_directory ENABLE ROW LEVEL SECURITY;
 -- ============================================================
 ALTER TABLE public.users ADD COLUMN IF NOT EXISTS agent_commission_percent numeric
   CHECK (agent_commission_percent IS NULL OR (agent_commission_percent >= 0 AND agent_commission_percent <= 100));
+
+-- ============================================================
+-- 2026-11-27 — migration: discount_rules_per_user_owners
+-- قواعد خصم لكل مستخدم: api_user (خصم الـ API الخاص — يتفوّق على api_global إن انطبق) و user (خصم المتجر الخاص)
+-- ============================================================
+ALTER TABLE public.discount_rules DROP CONSTRAINT IF EXISTS discount_rules_owner_type_check;
+ALTER TABLE public.discount_rules ADD CONSTRAINT discount_rules_owner_type_check
+  CHECK (owner_type = ANY (ARRAY['rank','vip','api_global','api_user','user']));
+ALTER TABLE public.discount_rules DROP CONSTRAINT IF EXISTS discount_rules_check1;
+ALTER TABLE public.discount_rules ADD CONSTRAINT discount_rules_check1
+  CHECK ((owner_type IN ('rank','api_user','user') AND owner_id IS NOT NULL) OR (owner_type IN ('vip','api_global') AND owner_id IS NULL));
+-- ترحيل api_tokens.custom_discount_percent إلى قاعدة api_user "كل المنتجات" ثم تصفير العمود (كان 0 صفوف وقت الترحيل)
+-- + trigger trg_cleanup_user_discount_rules: حذف قواعد المستخدم عند حذف المستخدم

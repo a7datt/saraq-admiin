@@ -4364,29 +4364,33 @@ async function startServer() {
     return Number.isFinite(v) && v > 0 && v < 100 ? v : 0;
   };
 
-  // [PHASE-2] خصم الـ API لكل منتج: نسبة التوكن المخصصة (custom_discount_percent) إن وُجدت تُطبَّق على كل
-  // المنتجات (مع حماية التكلفة)، وإلا تُطبَّق قواعد api_global — القاعدة الأدق فقط.
+  // [PHASE-2+] خصم الـ API لكل منتج: قواعد المستخدم صاحب التوكن (api_user) تتفوّق إن انطبقت قاعدة منها على المنتج،
+  // وإلا قواعد api_global — القاعدة الأدق فقط، مع حماية التكلفة. (النسبة المسطّحة القديمة للتوكن تبقى احتياطاً للتوافق.)
   const getApiDiscountResolver = async (tokenId: number | string | null | undefined): Promise<(product: any) => number> => {
     let custom: number | null = null;
+    let userRules: any[] = [];
     if (tokenId != null) {
       try {
         const { data: tokenRow, error } = await supabase
-          .from("api_tokens").select("custom_discount_percent").eq("id", tokenId).maybeSingle();
-        if (!error && tokenRow && tokenRow.custom_discount_percent !== null && tokenRow.custom_discount_percent !== undefined) {
-          const c = Number(tokenRow.custom_discount_percent);
-          if (Number.isFinite(c) && c >= 0 && c < 100) custom = c;
+          .from("api_tokens").select("user_id, custom_discount_percent").eq("id", tokenId).maybeSingle();
+        if (!error && tokenRow) {
+          if (tokenRow.user_id != null) userRules = await loadDiscountRules(supabase, "api_user", tokenRow.user_id);
+          if (tokenRow.custom_discount_percent !== null && tokenRow.custom_discount_percent !== undefined) {
+            const c = Number(tokenRow.custom_discount_percent);
+            if (Number.isFinite(c) && c >= 0 && c < 100) custom = c;
+          }
         }
-      } catch { /* العمود قد لا يكون موجوداً بعد */ }
+      } catch { /* تجاهل */ }
     }
-    if (custom !== null) {
-      const flat = custom;
-      return (product: any) => {
+    const globalRules = await loadDiscountRules(supabase, "api_global", null);
+    return (product: any) => {
+      if (pickMostSpecificRule(userRules, product)) return resolveDiscountPercent(userRules, product).percent;
+      if (custom !== null) {
         const cap = maxDiscountPercentForCost(product);
-        return cap !== null && flat > cap ? cap : flat;
-      };
-    }
-    const rules = await loadDiscountRules(supabase, "api_global", null);
-    return (product: any) => resolveDiscountPercent(rules, product).percent;
+        return cap !== null && custom > cap ? cap : custom;
+      }
+      return resolveDiscountPercent(globalRules, product).percent;
+    };
   };
   const getApiDiscountPercentForProduct = async (tokenId: number | string | null | undefined, product: any): Promise<number> =>
     (await getApiDiscountResolver(tokenId))(product);
@@ -6600,6 +6604,9 @@ async function startServer() {
       // خصم رتبة المستخدم (نظام الرتب) — يُطبَّق على المشتريات ويُؤخذ الأعلى بين الخصومات
       const rankDiscount = await getRankDiscountPercent((user as any).rank_id, product);
       if (rankDiscount > 0) discountPercent = Math.max(discountPercent, rankDiscount);
+      // [USER-RULES] قواعد خصم المتجر الخاصة بهذا المستخدم (من صفحة المستخدم) — الأعلى بين مصادر الخصم
+      const userStorePct = resolveDiscountPercent(await loadDiscountRules(supabase, "user", userId), product).percent;
+      if (userStorePct > 0) discountPercent = Math.max(discountPercent, userStorePct);
 
       if (stats) {
         // خصم مدى الحياة (الهدف 6: 3%، الهدف 7: 5%)
@@ -11161,17 +11168,26 @@ ${userContext}
     return out;
   }
 
-  const isDiscountOwner = (t: any) => ["rank", "vip", "api_global"].includes(t);
+  const isDiscountOwner = (t: any) => ["rank", "vip", "api_global", "api_user", "user"].includes(t);
+  // [USER-RULES] معرّف المالك: رتبة أو مستخدم موجود فعلاً، أو null للمالكين العامين
+  const resolveDiscountOwnerId = async (ownerType: string, raw: any): Promise<{ id: number | null; error?: string }> => {
+    if (ownerType === "vip" || ownerType === "api_global") return { id: null };
+    if (!isValidId(raw)) return { id: null, error: ownerType === "rank" ? "معرف الرتبة غير صحيح" : "معرف المستخدم غير صحيح" };
+    const id = Number(raw);
+    if (ownerType !== "rank") {
+      const { data: u } = await supabase.from("users").select("id").eq("id", id).maybeSingle();
+      if (!u) return { id: null, error: "المستخدم غير موجود" };
+    }
+    return { id };
+  };
 
   app.get("/api/admin/discount-rules", async (req, res) => {
     try {
       const ownerType = String(req.query.owner_type || "");
       if (!isDiscountOwner(ownerType)) return res.status(400).json({ error: "نوع المالك غير صحيح" });
-      let ownerId: number | null = null;
-      if (ownerType === "rank") {
-        if (!isValidId(req.query.owner_id)) return res.status(400).json({ error: "معرف الرتبة غير صحيح" });
-        ownerId = Number(req.query.owner_id);
-      }
+      const own = await resolveDiscountOwnerId(ownerType, req.query.owner_id);
+      if (own.error) return res.status(400).json({ error: own.error });
+      const ownerId = own.id;
       const rules = await loadDiscountRules(supabase, ownerType as any, ownerId);
       res.json({ rules, product_names: await discountProductNames(rules) });
     } catch (e: any) { safeError(res, e, undefined, req); }
@@ -11182,11 +11198,9 @@ ${userContext}
     try {
       const ownerType = String(req.body?.owner_type || "");
       if (!isDiscountOwner(ownerType)) return res.status(400).json({ error: "نوع المالك غير صحيح" });
-      let ownerId: number | null = null;
-      if (ownerType === "rank") {
-        if (!isValidId(req.body?.owner_id)) return res.status(400).json({ error: "معرف الرتبة غير صحيح" });
-        ownerId = Number(req.body.owner_id);
-      }
+      const own = await resolveDiscountOwnerId(ownerType, req.body?.owner_id);
+      if (own.error) return res.status(400).json({ error: own.error });
+      const ownerId = own.id;
       const r = await storeCore.saveDiscountRules(ownerType as any, ownerId, req.body?.items);
       logAdminActivity({ action_type: "discount_rules_updated", target_model: "discount_rules", target_id: `${ownerType}:${ownerId ?? "-"}`, details: `تحديث قواعد الخصم (${ownerType}${ownerId ? " #" + ownerId : ""}) — ${r.rules.length} قاعدة`, req }).catch(() => {});
       res.json({ success: true, ...r });
