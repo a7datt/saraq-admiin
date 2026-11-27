@@ -1999,6 +1999,18 @@ function botAuthFail(chatId: number, max = 5, lockMin = 15): boolean {
 }
 const botOtpLastSent = new Map<string, number>();
 
+// [BOT-PARITY] تفصيل السعر كما في صفحة تأكيد الطلب بالموقع: السعر الأصلي، نوع ونسبة الخصم ومقداره، السعر النهائي
+function botPriceBreakdown(base: number, pct: number, isVip: boolean): string {
+  const f = (n: number) => `${(Math.round(n * 1000) / 1000).toFixed(3)}$`;
+  if (!(pct > 0)) return `💵 السعر الإجمالي: ${f(base)}`;
+  const final = base * (1 - pct / 100);
+  return [
+    `💵 السعر الأصلي: ${f(base)}`,
+    `💎 ${isVip ? "خصم VIP" : "خصمك"} (${+pct.toFixed(2)}%): -${f(base - final)}`,
+    `✅ السعر النهائي: ${f(final)}`,
+  ].join("\n");
+}
+
 // --- Process Bot Order ---
 // [BOT-PARITY] طلبات البوت تمر الآن عبر createOrderCore نفسه المستخدم في الموقع: حجز ذرّي للرصيد، الخصومات،
 // وضع القبول التلقائي (إرسال فوري للمزوّد)، تحويل أخطاء المزوّد لطلب معلّق، المخزون، العمولات، وإشعار الأدمن.
@@ -19100,7 +19112,7 @@ async function startBots(isHotRestart: boolean = false) {
         if (user) {
           // [BOT-PARITY] نسبة الخصم الفعلية لهذا المنتج (VIP/رتبة/...) كما يحسبها الموقع
           const dp = await botDiscountPercent(user, product, false);
-          if (dp > 0) text += `\n💎 سعرك بعد الخصم (${+dp.toFixed(2)}%): ${(Number(product.price) * (1 - dp / 100)).toFixed(2)}$`;
+          if (dp > 0) text = text.replace(`💵 السعر: ${product.price}$`, botPriceBreakdown(Number(product.price) || 0, dp, !!user.is_vip));
         }
         text += `\n📦 نوع المتجر: ${storeTypeLabel}`;
 
@@ -19556,14 +19568,15 @@ async function startBots(isHotRestart: boolean = false) {
         const primaryValue = fieldValues[defaultFields[0]?.id] || "";
         // [BOT-PARITY] الإجمالي = سعر الوحدة × الكمية (كان يُتجاهل qty لمنتجات "الكميات") ثم خصم الموقع نفسه
         const fieldsBase = Number(state.data.baseTotal ?? product.price) || 0;
-        const finalPrice = (await botFinalPrice(user, product, fieldsBase)).final;
+        const fieldsQuote = await botFinalPrice(user, product, fieldsBase);
+        const finalPrice = fieldsQuote.final;
 
         userStates.set(chatId, {
           step: "quick_order_confirm",
           data: { product, user, price: finalPrice, baseTotal: fieldsBase, fieldValues, defaultFields, customFields, quantity: state.data.quantity || 1 }
         });
 
-        let confirmText = `تأكيد الطلب:\nالمنتج: ${product.name}\nالمعرف: ${primaryValue}\nالكمية: ${state.data.quantity || 1}\nالسعر الإجمالي: ${finalPrice.toFixed(2)}$`;
+        let confirmText = `تأكيد الطلب:\nالمنتج: ${product.name}\nالمعرف: ${primaryValue}\nالكمية: ${state.data.quantity || 1}\n\n${botPriceBreakdown(fieldsBase, fieldsQuote.percent, !!user?.is_vip)}`;
         if (customFields.length > 0) {
           confirmText += "\n\nحقول إضافية:\n" + customFields.map((f: any) => `${f.label}: ${fieldValues[f.id] || "-"}`).join("\n");
         }
