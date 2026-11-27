@@ -131,7 +131,7 @@ const ShamCashInvoiceRow: React.FC<{
           <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${badge.cls}`}>{badge.label}</span>
         </div>
       </div>
-      {inv.status === "pending" && (
+      {(inv.status === "pending" || inv.status === "expired") && !isAuto && (
         <div className="mt-2 flex items-center gap-2">
           <input
             type="text"
@@ -152,7 +152,7 @@ const ShamCashInvoiceRow: React.FC<{
             onClick={onReject}
             className="shrink-0 bg-red-100 text-red-600 px-3 py-1.5 rounded-md text-[11px] font-bold flex items-center gap-1 active:scale-95 disabled:opacity-50"
           >
-            <XCircle size={12} />رفض
+            <XCircle size={12} />إلغاء
           </button>
         </div>
       )}
@@ -215,14 +215,15 @@ const InvoicesAndAutoChargePanel = ({
   };
 
   const onReject = async (id: number) => {
+    if (!window.confirm("إلغاء هذه الفاتورة؟ لن يُضاف أي رصيد للمستخدم.")) return;
     setBusyId(id);
     const result = await handleRejectShamcashInvoice(id);
     setBusyId(null);
     if (result.ok) {
-      showToast("تم رفض الفاتورة", "success");
+      showToast("تم إلغاء الفاتورة", "success");
       load();
     } else {
-      showToast(result.error || "تعذّر رفض الفاتورة", "error");
+      showToast(result.error || "تعذّر إلغاء الفاتورة", "error");
     }
   };
 

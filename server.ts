@@ -956,7 +956,7 @@ async function renderPendingTransactions(bot: TelegramBot, chatId: number, page:
 
   const keyboard: any[][] = [];
   if (pageTxs.length === 0) {
-    lines.push("لا توجد معاملات قيد الانتظار حاليًا.");
+    lines.push("لا توجد معاملات يدوية قيد الانتظار حاليًا.");
   } else {
     for (const t of pageTxs) {
       const userName = t.users?.name || "مستخدم محذوف";
@@ -968,6 +968,27 @@ async function renderPendingTransactions(bot: TelegramBot, chatId: number, page:
         { text: "❌ رفض", callback_data: `reject_tx_${t.id}` },
       ]);
       keyboard.push([{ text: "✏️ تعديل قيمة الرصيد", callback_data: `edit_amount_tx_${t.id}` }]);
+    }
+  }
+
+  // [INVOICES] فواتير الدفع التلقائي غير المعالجة (معلّقة/منتهية بالزمن) — قبول أو إلغاء مباشر مثل لوحة التحكم
+  if (safePage === 0) {
+    const { data: invs } = await supabase.from("shamcash_invoices")
+      .select("id, invoice_number, amount, currency, status, expires_at, created_at, gateway_code, users(id, name), payment_methods(name)")
+      .in("status", ["pending", "expired"])
+      .not("invoice_number", "like", "AUTO-%")
+      .order("created_at", { ascending: false }).limit(10);
+    if (invs && invs.length) {
+      lines.push("", "🧾 فواتير بانتظار البت:", "");
+      for (const inv of invs as any[]) {
+        const expired = inv.status === "expired" || (inv.expires_at && new Date(inv.expires_at).getTime() < Date.now());
+        const cur = inv.currency === "USD" ? "$" : inv.currency === "USDT" ? "USDT" : "ل.س";
+        lines.push(`🧾 فاتورة ${inv.invoice_number} — ${inv.users?.name || "مستخدم محذوف"} (#${inv.users?.id ?? "-"})\nالمبلغ: ${inv.amount} ${cur} | ${inv.payment_methods?.name || "—"}\nالحالة: ${expired ? "منتهية المهلة" : "معلّقة"} | ${inv.created_at ? new Date(inv.created_at).toLocaleString("ar-EG") : "-"}`, "");
+        keyboard.push([
+          { text: `✅ قبول فاتورة #${inv.id}`, callback_data: `inv_ok_${inv.id}` },
+          { text: "🚫 إلغاء", callback_data: `inv_x_${inv.id}` },
+        ]);
+      }
     }
   }
 
@@ -1685,6 +1706,45 @@ async function renderActivityLogPage(bot: TelegramBot, chatId: number, messageId
 // استدعاء داخلي لمسار REST الرسمي POST /api/admin/orders/:id/status لضمان
 // أن يبقى مصدر الحقيقة (منطق الأعمال + إشعارات userBot) واحداً فقط، سواء من
 // لوحة التحكم (Web) أو من adminBot.
+// [INVOICES] استدعاء داخلي لمسارات قبول/إلغاء الفواتير بلوحة التحكم من بوت الأدمن — نفس منطق اللوحة حرفياً
+async function callInvoiceActionEndpoint(invoiceId: string | number, action: "approve" | "cancel"): Promise<{ success: boolean; error?: string; addedUsd?: number }> {
+  try {
+    const internalAdminToken = createAdminToken(undefined, "telegram-bot-internal", false);
+    const path = action === "approve" ? "approve" : "reject";
+    const resp = await fetch(`http://127.0.0.1:${process.env.PORT || 3100}/api/admin/shamcash-invoices/${invoiceId}/${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-admin-token": internalAdminToken },
+      body: JSON.stringify(action === "cancel" ? { mode: "cancel" } : {}),
+    });
+    const json: any = await resp.json().catch(() => ({}));
+    if (!resp.ok) return { success: false, error: json?.error || `HTTP ${resp.status}` };
+    return { success: true, addedUsd: json?.addedUsd };
+  } catch (e: any) {
+    return { success: false, error: e?.message || "network error" };
+  }
+}
+
+// [INVOICES] يضمن وجود حجز transactions بحالة pending_verification للفاتورة — الفواتير المنتهية
+// بالزمن يُحذف حجزها تلقائياً، فنعيد إنشاءه هنا ليتمكن الأدمن من قبولها يدوياً بعد انتهائها.
+async function ensureInvoiceReservation(inv: any): Promise<{ txId: number; created: boolean } | null> {
+  if (inv.transaction_id) {
+    const { data: tx } = await supabase.from("transactions").select("id, status").eq("id", inv.transaction_id).maybeSingle();
+    if (tx?.status === "pending_verification") return { txId: Number(tx.id), created: false };
+    if (tx) return null; // الحجز عولج بالفعل (مقبول/مرفوض) — لا نُنشئ حجزاً ثانياً
+  }
+  const { data: newTx, error } = await supabase.from("transactions").insert({
+    user_id: inv.user_id,
+    payment_method_id: inv.payment_method_id,
+    amount: parseFloat(String(inv.amount)) || 0,
+    tx_number: `INV_ADMIN_${inv.id}_${Date.now()}`,
+    status: "pending_verification",
+    note: `حجز أُعيد إنشاؤه لقبول يدوي لفاتورة ${inv.invoice_number}`,
+  }).select("id").single();
+  if (error || !newTx) return null;
+  await supabase.from("shamcash_invoices").update({ transaction_id: newTx.id }).eq("id", inv.id);
+  return { txId: Number(newTx.id), created: true };
+}
+
 async function callOrderStatusEndpoint(
   orderId: string | number,
   status?: string,
@@ -12535,15 +12595,15 @@ ${responseText}`);
     try {
       const { data: inv, error: invErr } = await supabase.from("shamcash_invoices").select("*").eq("id", req.params.id).single();
       if (invErr || !inv) return res.status(404).json({ error: "الفاتورة غير موجودة" });
-      if (inv.status !== "pending") {
-        const map: Record<string, string> = { paid: "هذه الفاتورة مقبولة بالفعل.", expired: "انتهت صلاحية هذه الفاتورة.", cancelled: "تم إلغاء هذه الفاتورة." };
+      // [INVOICES] الأدمن يقدر يقبل أي فاتورة لم تُعالَج بعد (معلّقة أو منتهية الصلاحية بالزمن) —
+      // مثلاً المستخدم دفع فعلاً لكن تأخّر بالتحقق حتى انتهت المهلة.
+      if (inv.status !== "pending" && inv.status !== "expired") {
+        const map: Record<string, string> = { paid: "هذه الفاتورة مقبولة بالفعل.", cancelled: "تم إلغاء هذه الفاتورة.", rejected: "تم رفض هذه الفاتورة." };
         return res.status(409).json({ error: map[inv.status] || "حالة الفاتورة لا تسمح بالقبول" });
       }
-      if (inv.expires_at && new Date(inv.expires_at).getTime() < Date.now()) {
-        await supabase.from("shamcash_invoices").update({ status: "expired", updated_at: new Date().toISOString() }).eq("id", inv.id);
-        await supabase.from("transactions").delete().eq("id", inv.transaction_id).eq("status", "pending_verification");
-        return res.status(409).json({ error: "انتهت صلاحية هذه الفاتورة فعلياً — لا يمكن قبولها." });
-      }
+      const reservation = await ensureInvoiceReservation(inv);
+      if (!reservation) return res.status(409).json({ error: "عملية الشحن المرتبطة بهذه الفاتورة عولجت بالفعل." });
+      inv.transaction_id = reservation.txId;
 
       const { data: method } = await supabase.from("payment_methods")
         .select("name, currency_id, bonus_type, bonus_percent").eq("id", inv.payment_method_id).single();
@@ -12570,10 +12630,11 @@ ${responseText}`);
         .from("shamcash_invoices")
         .update({ status: "paid", updated_at: new Date().toISOString() })
         .eq("id", inv.id)
-        .eq("status", "pending")
+        .in("status", ["pending", "expired"])
         .select("id");
       if (casErr) throw casErr;
       if (!Array.isArray(casRows) || casRows.length === 0) {
+        if (reservation.created) await supabase.from("transactions").delete().eq("id", reservation.txId).eq("status", "pending_verification");
         return res.status(409).json({ error: "تمت معالجة هذه الفاتورة بالفعل من قبل" });
       }
 
@@ -12648,16 +12709,19 @@ ${responseText}`);
     try {
       const { data: inv, error: invErr } = await supabase.from("shamcash_invoices").select("*").eq("id", req.params.id).single();
       if (invErr || !inv) return res.status(404).json({ error: "الفاتورة غير موجودة" });
-      if (inv.status !== "pending") {
-        const map: Record<string, string> = { paid: "هذه الفاتورة مقبولة بالفعل.", expired: "انتهت صلاحية هذه الفاتورة.", cancelled: "تم إلغاء هذه الفاتورة.", rejected: "تم رفض هذه الفاتورة بالفعل." };
-        return res.status(409).json({ error: map[inv.status] || "حالة الفاتورة لا تسمح بالرفض" });
+      // [INVOICES] mode=cancel → إلغاء الفاتورة (cancelled) + إلغاؤها لدى المزوّد إن أمكن، وإلا رفض (rejected).
+      // يعمل على الفواتير المعلّقة والمنتهية بالزمن التي لم تُعالَج بعد.
+      const isCancel = req.body?.mode === "cancel";
+      if (inv.status !== "pending" && inv.status !== "expired") {
+        const map: Record<string, string> = { paid: "هذه الفاتورة مقبولة بالفعل.", cancelled: "تم إلغاء هذه الفاتورة.", rejected: "تم رفض هذه الفاتورة بالفعل." };
+        return res.status(409).json({ error: map[inv.status] || "حالة الفاتورة لا تسمح بالإلغاء" });
       }
 
       const { data: casRows, error: casErr } = await supabase
         .from("shamcash_invoices")
-        .update({ status: "rejected", updated_at: new Date().toISOString() })
+        .update({ status: isCancel ? "cancelled" : "rejected", updated_at: new Date().toISOString() })
         .eq("id", inv.id)
-        .eq("status", "pending")
+        .in("status", ["pending", "expired"])
         .select("id");
       if (casErr) throw casErr;
       if (!Array.isArray(casRows) || casRows.length === 0) {
@@ -12668,8 +12732,13 @@ ${responseText}`);
         await supabase.from("transactions").delete().eq("id", inv.transaction_id).eq("status", "pending_verification");
       }
 
-      await logAdminActivity({ action_type: "invoice_rejected", target_model: "shamcash_invoices", target_id: String(inv.id), details: `تم رفض فاتورة ${GATEWAY_LABEL_AR[(inv.gateway_code || "shamcash") as GatewayCode]} رقم ${inv.invoice_number}`, req });
-      sendTelegramToUser(inv.user_id, `❌ تم رفض فاتورة ${GATEWAY_LABEL_AR[(inv.gateway_code || "shamcash") as GatewayCode]} رقم ${inv.invoice_number}. تواصل مع الدعم إن كنت قد أتممت الدفع فعلياً.`);
+      const gwLabel = GATEWAY_LABEL_AR[(inv.gateway_code || "shamcash") as GatewayCode];
+      if (isCancel && inv.status === "pending" && !String(inv.invoice_number || "").startsWith("AUTO-")) {
+        // أفضل محاولة: إلغاء الفاتورة لدى المزوّد حتى لا يُدفع عليها لاحقاً — الإلغاء المحلي تم بكل الأحوال
+        try { await cancelShamCashInvoice((inv.gateway_code || "shamcash") as GatewayCode, inv.invoice_number); } catch {}
+      }
+      await logAdminActivity({ action_type: isCancel ? "invoice_cancelled" : "invoice_rejected", target_model: "shamcash_invoices", target_id: String(inv.id), details: `تم ${isCancel ? "إلغاء" : "رفض"} فاتورة ${gwLabel} رقم ${inv.invoice_number}`, req });
+      sendTelegramToUser(inv.user_id, `❌ تم ${isCancel ? "إلغاء" : "رفض"} فاتورة ${gwLabel} رقم ${inv.invoice_number} من قبل الإدارة. تواصل مع الدعم إن كنت قد أتممت الدفع فعلياً.`);
 
       res.json({ success: true });
     } catch (e: any) {
@@ -17364,6 +17433,15 @@ async function startBots(isHotRestart: boolean = false) {
             try { await adminBot!.answerCallbackQuery(query.id, { text: "⚠️ هذه العملية تم البت فيها بالفعل.", show_alert: true }); } catch {}
             await updateAllTrackedNotifications(adminBot!, "tx", txId, await buildTxNotificationSummary(txId));
             clearTrackedNotification("tx", txId);
+          }
+        } else if (data?.startsWith("inv_ok_") || data?.startsWith("inv_x_")) {
+          // [INVOICES] قبول/إلغاء فاتورة من البوت — عبر نفس مسار لوحة التحكم
+          const isOk = data.startsWith("inv_ok_");
+          const invId = data.split("_")[2];
+          const r = await callInvoiceActionEndpoint(invId, isOk ? "approve" : "cancel");
+          try { await adminBot!.answerCallbackQuery(query.id, { text: r.success ? (isOk ? `✅ تم قبول الفاتورة${r.addedUsd ? ` وشحن ${r.addedUsd}$` : ""}` : "🚫 تم إلغاء الفاتورة") : `⚠️ ${r.error}`, show_alert: !r.success }); } catch {}
+          if (r.success && query.message) {
+            try { await renderPendingTransactions(adminBot!, query.message.chat.id, 0, query.message.message_id); } catch {}
           }
         } else if (data?.startsWith("reject_tx_")) {
           const txId = data.split("_")[2];

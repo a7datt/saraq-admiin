@@ -2872,7 +2872,11 @@ export default function AdminPage({
     };
 
     const handleRejectShamcashInvoice = async (id: number): Promise<{ ok: boolean; error?: string }> => {
-      const res = await adminFetch(`/api/admin/shamcash-invoices/${id}/reject`, { method: "POST" });
+      const res = await adminFetch(`/api/admin/shamcash-invoices/${id}/reject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "cancel" })
+      });
       const data = await res.json().catch(() => ({} as any));
       fetchAdminTransactions();
       return { ok: res.ok, error: data?.error };
