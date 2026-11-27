@@ -76,6 +76,8 @@ import AdminHomePage from "./AdminHomePage";
 import AdminRanksPage from "./AdminRanksPage";
 import AdminBulkMarginPage from "./AdminBulkMarginPage";
 import AdminIdentityPage from "./AdminIdentityPage";
+import AdminAgentsPage from "./AdminAgentsPage";
+import { Briefcase } from "lucide-react";
 import AdminStatsPage from "./AdminStatsPage";
 import SessionsActivityAdminPage from "./SessionsActivityAdminPage";
 import DevManagementPage from "./DevManagementPage";
@@ -3232,6 +3234,7 @@ export default function AdminPage({
                 : adminTab === "dev_management" ? "صفحة المطور"
                 : adminTab === "sub_admins" ? "المسؤولون الثانويون"
                 : adminTab === "more" ? "المزيد"
+                : adminTab === "agents" ? "الوكلاء"
                 : "لوحة التحكم"}
             </h1>
             <div className="flex items-center gap-2">
@@ -3352,6 +3355,7 @@ export default function AdminPage({
                         { label: "تحديد الرتب", icon: <Award size={17}/>, action: () => { setAdminTab("ranks"); } },
                         { label: "تعديل نسبة الربح", icon: <Percent size={17}/>, action: () => { setAdminTab("bulk_margin"); } },
                         { label: "توثيقات الهوية", icon: <ShieldCheck size={17}/>, action: () => { setAdminTab("identity"); } },
+                        { label: "الوكلاء", icon: <Briefcase size={17}/>, action: () => { setAdminTab("agents"); } },
                       ].map((item, i) => (
                         <button
                           key={i}
@@ -3499,6 +3503,7 @@ export default function AdminPage({
           {adminTab === "currencies" && <CurrenciesAdminPage adminFetch={adminFetch} onBack={() => setAdminTab("admin_home")} />}
           {adminTab === "ranks" && <AdminRanksPage adminFetch={adminFetch} onBack={() => setAdminTab("admin_home")} />}
           {adminTab === "identity" && <AdminIdentityPage adminFetch={adminFetch} onBack={() => setAdminTab("admin_home")} />}
+          {adminTab === "agents" && <AdminAgentsPage adminFetch={adminFetch} onBack={() => setAdminTab("more")} />}
           {adminTab === "bulk_margin" && <AdminBulkMarginPage adminFetch={adminFetch} onBack={() => setAdminTab("admin_home")} />}
 
           {/* ===== AHMINIX ===== */}
@@ -3768,8 +3773,9 @@ export default function AdminPage({
                   { key:"ranks", label:"تحديد الرتب", icon:<Award size={18}/>, color:"text-rose-600 bg-rose-50" },
                   { key:"bulk_margin", label:"تعديل نسبة الربح", icon:<Percent size={18}/>, color:"text-teal-600 bg-teal-50" },
                   { key:"identity", label:"توثيقات الهوية", icon:<ShieldCheck size={18}/>, color:"text-sky-600 bg-sky-50" },
+                  { key:"agents", label:"الوكلاء", icon:<Briefcase size={18}/>, color:"text-amber-600 bg-amber-50" },
                 ].map(item => (
-                  <button key={item.key} onClick={() => { if(item.key==="payment_gateways"){setAdminTab("payment_gateways");setActiveSubMenu(null);}else if(item.key==="ranks"||item.key==="bulk_margin"||item.key==="identity"){setAdminTab(item.key);setActiveSubMenu(null);}else if(item.key==="add_paymentMethod"){setAdminTab("add_paymentMethod");setActiveSubMenu("add_paymentMethod");}else setActiveSubMenu(item.key); }}
+                  <button key={item.key} onClick={() => { if(item.key==="payment_gateways"){setAdminTab("payment_gateways");setActiveSubMenu(null);}else if(item.key==="ranks"||item.key==="bulk_margin"||item.key==="identity"||item.key==="agents"){setAdminTab(item.key);setActiveSubMenu(null);}else if(item.key==="add_paymentMethod"){setAdminTab("add_paymentMethod");setActiveSubMenu("add_paymentMethod");}else setActiveSubMenu(item.key); }}
                     className="flex flex-col items-center gap-1.5 p-2 rounded-lg hover:bg-gray-50 active:scale-95 transition-all">
                     <div className={`w-11 h-11 rounded-lg flex items-center justify-center ${item.color}`}>{item.icon}</div>
                     <span className="text-[9px] font-bold text-gray-600 text-center leading-tight">{item.label}</span>

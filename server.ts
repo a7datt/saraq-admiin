@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import { createBotPricing, botNormEmail, botValidEmail, botValidPhone } from "./botHelpers";
 import { createStoreCore, CoreError } from "./storeCore";
+import { createAgentCore } from "./agentCore";
 import { createAdminExtras } from "./adminBotExtras";
 import { createUserExtras } from "./userBotExtras";
 import { loadDiscountRules, resolveDiscountPercent, sanitizeRulesInput, maxDiscountPercentForCost, pickMostSpecificRule } from "./discountEngine";
@@ -1890,6 +1891,7 @@ function computeOrderNetProfit(product: any, total: number, qty: number, costPer
 // ============================================================
 const { botDiscountPercent, botFinalPrice } = createBotPricing(supabase);
 const storeCore = createStoreCore(supabase);
+const agentCore = createAgentCore(supabase); // [AGENTS]
 
 // إشعار المستخدم (تيليجرام) بنتيجة طلب توثيق الهوية — يُستدعى من الموقع ومن بوت الأدمن معاً
 async function notifyIdentityResult(userId: number | string, approved: boolean, reason?: string) {
@@ -2083,6 +2085,12 @@ async function processBotOrder(chatId: number, user: any, product: any, price: n
       } catch (refErr) {
         console.error(`[REFERRAL] فشل حساب/إضافة عمولة الإحالة لطلب البوت #${order.id}:`, refErr);
       }
+    }
+
+    // [AGENTS] عمولة الوكيل من صافي ربح الطلب
+    if (user.agent_id) {
+      const botCostForAgent = product?.store_type === "external_api" ? botCostPrice : 0;
+      await agentCore.applyAgentCommission({ orderId: order.id, buyerId: user.id, agentId: user.agent_id, netProfit: computeOrderNetProfit(product, price, safeQty, botCostForAgent) });
     }
 
     userBot?.sendMessage(chatId, `✅ تمت عملية الشراء بنجاح!\nرقم الطلب: ${order.id}\nالمنتج: ${product.name}\nالمبلغ المخصوم: ${price.toFixed(2)}$`);
@@ -4055,6 +4063,7 @@ async function startServer() {
   app.use(["/api/admin/discount-rules", "/api/admin/discount-scope-tree", "/api/admin/discount-scope-search"], adminAuth, permGuard("rewards"));
   app.use("/api/admin/products/bulk-profit", adminAuth, permGuard("store"));
   app.use("/api/admin/identity", adminAuth, permGuard("users"));
+  app.use("/api/admin/agents", adminAuth, permGuard("users")); // [AGENTS]
   app.use(["/api/admin/api-tokens", "/api/admin/users/:id/api-token", "/api/admin/public-api-settings"], adminAuth, permGuard("settings_api"));
   // [SECURITY FIX -- تقرير الفحص الأمني، الجولة 4، القسم 1] نفس نمط الخلل تماماً: مسارات
   // /api/admin/providers/*، /api/admin/ahminix/*، و/api/admin/payment-gateways/* كانت جميعها
@@ -6959,6 +6968,11 @@ async function startServer() {
         if (!refResult.ok) {
           notifyAdmins("system_alerts", `⚠️ فشل إضافة عمولة إحالة للطلب #ORD${order.id} (المُحيل: #${user.referred_by_id}). يتطلب مراجعة يدوية.\nالسبب: ${refResult.error}`);
         }
+      }
+
+      // [AGENTS] عمولة الوكيل من صافي ربح الطلب
+      if (user.agent_id) {
+        await agentCore.applyAgentCommission({ orderId: order.id, buyerId: userId, agentId: user.agent_id, netProfit: computeOrderNetProfit(product, total, safeQty, snapshotCostPrice) });
       }
 
       // إشعار تلجرام (استدعاء واحد فقط لتفادي إرسال إشعارين مكررين لنفس الطلب)
@@ -10953,6 +10967,143 @@ ${userContext}
     try {
       await storeCore.setIdentitySettings({ enabled: req.body?.enabled === undefined ? undefined : !!req.body.enabled, description: req.body?.description });
       logAdminActivity({ action_type: "identity_settings_updated", target_model: "settings", target_id: "identity", details: "تحديث إعدادات توثيق الهوية", req }).catch(() => {});
+      res.json({ success: true });
+    } catch (e: any) { coreFail(res, e, req); }
+  });
+
+  // =================== [AGENTS] إدارة نظام الوكلاء ودليل "وكلائنا" ===================
+  app.get("/api/admin/agents/settings", async (_req, res) => {
+    try { res.json(await agentCore.getAgentSettings(true)); } catch (e: any) { coreFail(res, e, _req); }
+  });
+
+  app.put("/api/admin/agents/settings", async (req, res) => {
+    try {
+      const b = req.body || {};
+      const rows: Array<{ key: string; value: string }> = [];
+      if (b.enabled !== undefined) rows.push({ key: "agents_enabled", value: b.enabled ? "true" : "false" });
+      if (b.mode !== undefined) {
+        if (b.mode !== "all" && b.mode !== "selected") return res.status(400).json({ error: "نمط التفعيل غير صالح" });
+        rows.push({ key: "agents_mode", value: b.mode });
+      }
+      if (b.percent !== undefined) {
+        const pct = Number(b.percent);
+        if (!Number.isFinite(pct) || pct < 0 || pct > 100) return res.status(400).json({ error: "نسبة العمولة يجب أن تكون بين 0 و100" });
+        rows.push({ key: "agent_commission_percent", value: String(Math.round(pct * 100) / 100) });
+      }
+      if (b.directoryEnabled !== undefined) rows.push({ key: "agents_directory_enabled", value: b.directoryEnabled ? "true" : "false" });
+      if (rows.length) {
+        const { error } = await supabase.from("settings").upsert(rows, { onConflict: "key" });
+        if (error) throw error;
+      }
+      agentCore.invalidate();
+      logAdminActivity({ action_type: "agents_settings_updated", target_model: "settings", target_id: "agents", details: `تحديث إعدادات الوكلاء: ${rows.map(r => `${r.key}=${r.value}`).join("، ")}`, req }).catch(() => {});
+      res.json(await agentCore.getAgentSettings(true));
+    } catch (e: any) { coreFail(res, e, req); }
+  });
+
+  // قائمة الوكلاء: المفعّلون يدوياً + كل من لديه عملاء مسجّلون عبره
+  app.get("/api/admin/agents", async (req, res) => {
+    try {
+      const cols = "id, name, email, agent_enabled, agent_code, is_banned, created_at";
+      const enabledRows = await fetchAllRowsPaged<any>((f, t) => supabase.from("users").select(cols).eq("agent_enabled", true).order("id").range(f, t));
+      const clientRows = await fetchAllRowsPaged<any>((f, t) => supabase.from("users").select("agent_id").not("agent_id", "is", null).eq("is_verified", true).order("id").range(f, t));
+      const clientCount: Record<string, number> = {};
+      for (const r of clientRows) clientCount[r.agent_id] = (clientCount[r.agent_id] || 0) + 1;
+      const byId: Record<string, any> = {};
+      for (const u of enabledRows) byId[u.id] = u;
+      const missing = Object.keys(clientCount).filter(id => !byId[id]);
+      for (let i = 0; i < missing.length; i += 200) {
+        const { data } = await supabase.from("users").select(cols).in("id", missing.slice(i, i + 200));
+        for (const u of data || []) byId[u.id] = u;
+      }
+      const comms = await fetchAllRowsPaged<any>((f, t) => supabase.from("agent_commissions").select("agent_id, amount, reversed_at").order("id").range(f, t));
+      const commTotal: Record<string, number> = {};
+      for (const c of comms) if (!c.reversed_at) commTotal[c.agent_id] = (commTotal[c.agent_id] || 0) + (Number(c.amount) || 0);
+      const settings = await agentCore.getAgentSettings(true);
+      const list = Object.values(byId).map((u: any) => ({
+        id: u.id, name: u.name, email: u.email, agent_enabled: !!u.agent_enabled, agent_code: u.agent_code,
+        is_active_agent: agentCore.isAgentWith(settings, u),
+        clients_count: clientCount[u.id] || 0,
+        total_commission: Math.round((commTotal[u.id] || 0) * 10000) / 10000,
+      })).sort((a: any, b: any) => b.clients_count - a.clients_count || b.id - a.id);
+      res.json({ agents: list, settings });
+    } catch (e: any) { coreFail(res, e, req); }
+  });
+
+  app.post("/api/admin/agents/users/:id", async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "رقم المستخدم غير صالح" });
+      const enabled = !!req.body?.enabled;
+      const { data: u, error } = await supabase.from("users").update({ agent_enabled: enabled }).eq("id", id).select("id, name").maybeSingle();
+      if (error) throw error;
+      if (!u) return res.status(404).json({ error: "المستخدم غير موجود" });
+      const code = enabled ? await agentCore.ensureAgentCode(id) : null;
+      logAdminActivity({ action_type: enabled ? "agent_enabled" : "agent_disabled", target_model: "users", target_id: String(id), details: `${enabled ? "تفعيل" : "إلغاء"} حساب الوكيل للمستخدم ${u.name} (#${id})`, req }).catch(() => {});
+      res.json({ success: true, agent_code: code });
+    } catch (e: any) { coreFail(res, e, req); }
+  });
+
+  app.get("/api/admin/agents/users/:id/clients", async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "رقم المستخدم غير صالح" });
+      res.json(await agentCore.getAgentClients(id, 1000));
+    } catch (e: any) { coreFail(res, e, req); }
+  });
+
+  const cleanDirectoryInput = (b: any) => {
+    const str = (v: any, max: number) => (v === undefined || v === null) ? null : (String(v).trim().slice(0, max) || null);
+    const url = (v: any) => { const x = str(v, 500); return x && /^https?:\/\//i.test(x) ? x : (x ? `https://${x}` : null); };
+    return {
+      name: str(b.name, 100),
+      image_url: str(b.image_url, 1000),
+      website_url: url(b.website_url),
+      phone: str(b.phone, 40),
+      location: str(b.location, 300),
+      description: str(b.description, 1000),
+      is_active: b.is_active === undefined ? true : !!b.is_active,
+      sort_order: Number.isFinite(Number(b.sort_order)) ? Math.trunc(Number(b.sort_order)) : 0,
+    };
+  };
+
+  app.get("/api/admin/agents/directory", async (req, res) => {
+    try {
+      const { data, error } = await supabase.from("agents_directory").select("*").order("sort_order").order("id");
+      if (error) throw error;
+      res.json(data || []);
+    } catch (e: any) { coreFail(res, e, req); }
+  });
+
+  app.post("/api/admin/agents/directory", async (req, res) => {
+    try {
+      const row = cleanDirectoryInput(req.body || {});
+      if (!row.name) return res.status(400).json({ error: "اسم الوكيل مطلوب" });
+      const { data, error } = await supabase.from("agents_directory").insert(row).select("*").single();
+      if (error) throw error;
+      logAdminActivity({ action_type: "agent_directory_added", target_model: "agents_directory", target_id: String(data.id), details: `إضافة وكيل إلى "وكلائنا": ${row.name}`, req }).catch(() => {});
+      res.json(data);
+    } catch (e: any) { coreFail(res, e, req); }
+  });
+
+  app.put("/api/admin/agents/directory/:id", async (req, res) => {
+    try {
+      const row = cleanDirectoryInput(req.body || {});
+      if (!row.name) return res.status(400).json({ error: "اسم الوكيل مطلوب" });
+      const { data, error } = await supabase.from("agents_directory").update({ ...row, updated_at: new Date().toISOString() }).eq("id", req.params.id).select("*").maybeSingle();
+      if (error) throw error;
+      if (!data) return res.status(404).json({ error: "الوكيل غير موجود" });
+      logAdminActivity({ action_type: "agent_directory_updated", target_model: "agents_directory", target_id: String(data.id), details: `تعديل وكيل في "وكلائنا": ${row.name}`, req }).catch(() => {});
+      res.json(data);
+    } catch (e: any) { coreFail(res, e, req); }
+  });
+
+  app.delete("/api/admin/agents/directory/:id", async (req, res) => {
+    try {
+      const { data, error } = await supabase.from("agents_directory").delete().eq("id", req.params.id).select("id, name").maybeSingle();
+      if (error) throw error;
+      if (!data) return res.status(404).json({ error: "الوكيل غير موجود" });
+      logAdminActivity({ action_type: "agent_directory_deleted", target_model: "agents_directory", target_id: String(data.id), details: `حذف وكيل من "وكلائنا": ${data.name}`, req }).catch(() => {});
       res.json({ success: true });
     } catch (e: any) { coreFail(res, e, req); }
   });

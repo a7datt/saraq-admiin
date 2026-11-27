@@ -307,3 +307,32 @@ CREATE INDEX IF NOT EXISTS idx_products_category_order ON public.products (categ
 -- ==========================================================================
 ALTER TABLE public.shamcash_invoices DROP CONSTRAINT IF EXISTS shamcash_invoices_status_check;
 ALTER TABLE public.shamcash_invoices ADD CONSTRAINT shamcash_invoices_status_check CHECK (status = ANY (ARRAY['pending'::text, 'paid'::text, 'expired'::text, 'cancelled'::text, 'rejected'::text]));
+
+-- ============================================================
+-- 2026-11-27 — migration: agents_system (نظام الوكلاء)
+-- ============================================================
+-- users: agent_enabled (تفعيل فردي)، agent_code (كود الوكيل الفريد)، agent_id (الوكيل الذي سجّل المستخدم عبره)
+-- agent_commissions: عمولة واحدة لكل طلب (order_id UNIQUE) + reversed_at عند الاسترجاع
+-- agents_directory: صفحة "وكلائنا" (اسم، صورة، رابط موقع، هاتف، موقع جغرافي، وصف، ظهور، ترتيب)
+-- settings: agents_enabled=false, agents_mode=selected, agent_commission_percent=5, agents_directory_enabled=true
+-- apply_agent_commission(order, agent, user, amount, net_profit, percent): إضافة ذرّية لمرة واحدة + حركة رصيد
+-- refund_order_once: أصبحت تعكس عمولة الوكيل المرتبطة بالطلب (مرة واحدة) عند الاسترجاع
+ALTER TABLE public.users
+  ADD COLUMN IF NOT EXISTS agent_enabled boolean NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS agent_code text,
+  ADD COLUMN IF NOT EXISTS agent_id bigint REFERENCES public.users(id) ON DELETE SET NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS users_agent_code_uidx ON public.users (upper(agent_code)) WHERE agent_code IS NOT NULL;
+CREATE INDEX IF NOT EXISTS users_agent_id_idx ON public.users (agent_id) WHERE agent_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS users_agent_enabled_idx ON public.users (agent_enabled) WHERE agent_enabled;
+CREATE TABLE IF NOT EXISTS public.agent_commissions (
+  id bigserial PRIMARY KEY, agent_id bigint NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  user_id bigint REFERENCES public.users(id) ON DELETE SET NULL, order_id bigint NOT NULL UNIQUE,
+  amount numeric NOT NULL CHECK (amount > 0), net_profit numeric NOT NULL DEFAULT 0, percent numeric NOT NULL DEFAULT 0,
+  reversed_at timestamptz, created_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE public.agent_commissions ENABLE ROW LEVEL SECURITY;
+CREATE TABLE IF NOT EXISTS public.agents_directory (
+  id bigserial PRIMARY KEY, name text NOT NULL, image_url text, website_url text, phone text, location text, description text,
+  is_active boolean NOT NULL DEFAULT true, sort_order integer NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE public.agents_directory ENABLE ROW LEVEL SECURITY;
+-- (نص الدالتين الكامل مطبّق عبر Supabase migration "agents_system")
