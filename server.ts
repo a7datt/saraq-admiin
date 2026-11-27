@@ -17969,6 +17969,19 @@ async function startBots(isHotRestart: boolean = false) {
           return;
         }
 
+        // [AGENTS] رابط الوكيل للبوت: t.me/<bot>?start=agent_CODE
+        const agentStart = /^agent_([A-Za-z0-9]{4,16})$/.exec(startParam);
+        if (agentStart) {
+          const { data: already } = await supabase.from("users").select("*").eq("telegram_chat_id", chatId).maybeSingle();
+          if (already) { sendMainMenu(chatId, already, userBot!); return; }
+          const agentIdFromLink = await agentCore.resolveAgentIdByCode(agentStart[1]);
+          if (agentIdFromLink) {
+            userStates.set(chatId, { step: "register_name", data: { agentId: agentIdFromLink, agentCode: agentStart[1].toUpperCase() } });
+            userBot!.sendMessage(chatId, `مرحباً بك! 🤝 تمت دعوتك عبر الوكيل (${agentStart[1].toUpperCase()}).\nيرجى إدخال اسمك الكامل لإنشاء حساب:`);
+            return;
+          }
+        }
+
         // Referral code
         const { data: referrer } = /^[0-9]{1,12}$/.test(startParam)
           ? await supabase.from("users").select("id").eq("id", startParam).maybeSingle()
@@ -18532,6 +18545,13 @@ async function startBots(isHotRestart: boolean = false) {
       } else if (data === "register") {
         userStates.set(chatId, { step: "register_name", data: {} });
         userBot!.sendMessage(chatId, "يرجى إدخال اسمك الكامل:");
+
+      } else if (data === "reg_agent_skip") {
+        const st = userStates.get(chatId);
+        if (st?.step === "register_agent") {
+          st.step = "register_password";
+          userBot!.sendMessage(chatId, "يرجى إدخال كلمة المرور (8 أحرف وأرقام على الأقل):");
+        }
 
       } else if (data === "login_with_code") {
         userStates.set(chatId, { step: "login_with_code", data: {} });
@@ -19724,8 +19744,32 @@ async function startBots(isHotRestart: boolean = false) {
         const ph = String(text || "").trim();
         if (!botValidPhone(ph)) return userBot!.sendMessage(chatId, "❌ رقم الهاتف غير صحيح (أرقام فقط، 7 إلى 15 رقماً)، أعد إدخاله:");
         state.data.phone = ph;
+        if (!state.data.agentId && (await agentCore.getAgentSettings()).enabled) {
+          state.step = "register_agent";
+          userBot!.sendMessage(chatId, "🤝 إذا كان لديك كود وكيل أدخله الآن (اختياري)، أو اضغط «تخطي»:", {
+            reply_markup: { inline_keyboard: [[{ text: "⏭️ تخطي", callback_data: "reg_agent_skip" }]] }
+          });
+          return;
+        }
         state.step = "register_password";
         userBot!.sendMessage(chatId, "يرجى إدخال كلمة المرور (8 أحرف وأرقام على الأقل):");
+
+      } else if (state.step === "register_agent") {
+        const raw = String(text || "").trim();
+        if (/^(تخطي|تخطى|skip|-|0)$/i.test(raw)) {
+          state.step = "register_password";
+          return userBot!.sendMessage(chatId, "يرجى إدخال كلمة المرور (8 أحرف وأرقام على الأقل):");
+        }
+        const agentIdTyped = await agentCore.resolveAgentIdByCode(raw);
+        if (!agentIdTyped) {
+          return userBot!.sendMessage(chatId, "❌ كود الوكيل غير صحيح أو غير مفعّل. أعد إدخاله أو اضغط «تخطي»:", {
+            reply_markup: { inline_keyboard: [[{ text: "⏭️ تخطي", callback_data: "reg_agent_skip" }]] }
+          });
+        }
+        state.data.agentId = agentIdTyped;
+        state.data.agentCode = raw.toUpperCase();
+        state.step = "register_password";
+        userBot!.sendMessage(chatId, `✅ تم ربطك بالوكيل (${raw.toUpperCase()}).\nيرجى إدخال كلمة المرور (8 أحرف وأرقام على الأقل):`);
 
       } else if (state.step === "register_password") {
         userBot!.deleteMessage(chatId, msg.message_id).catch(() => {});
@@ -19756,9 +19800,12 @@ async function startBots(isHotRestart: boolean = false) {
             return userBot!.sendMessage(chatId, "❌ هذا البريد الإلكتروني مسجل مسبقاً. استخدم /start لتسجيل الدخول.");
           }
 
+          // [AGENTS] إعادة التحقق من أهلية الوكيل لحظة الإنشاء
+          const botAgentId = state.data.agentCode ? await agentCore.resolveAgentIdByCode(state.data.agentCode) : null;
+
           let userId: number;
           if (existing && !existing.is_verified) {
-            await supabase.from("users").update({ name: state.data.name, password_hash: hashedPassword, phone: state.data.phone }).eq("id", existing.id);
+            await supabase.from("users").update({ name: state.data.name, password_hash: hashedPassword, phone: state.data.phone, ...(botAgentId ? { agent_id: botAgentId } : {}) }).eq("id", existing.id);
             userId = existing.id;
           } else {
             const { data: newUser, error } = await supabase.from("users").insert({
@@ -19767,6 +19814,7 @@ async function startBots(isHotRestart: boolean = false) {
               password_hash: hashedPassword,
               phone: state.data.phone,
               referred_by_id: referredById,
+              agent_id: botAgentId,
               is_verified: false
             }).select().single();
             if (error) throw error;
