@@ -9,7 +9,7 @@ interface Props {
 }
 
 interface Cfg { enabled: boolean; mode: "all" | "selected"; percent: number; directoryEnabled: boolean }
-interface AgentRow { id: number; name: string; email: string; agent_enabled: boolean; agent_code: string | null; is_active_agent: boolean; clients_count: number; total_commission: number }
+interface AgentRow { id: number; name: string; email: string; agent_enabled: boolean; agent_code: string | null; is_active_agent: boolean; clients_count: number; total_commission: number; custom_percent: number | null; effective_percent: number }
 interface DirRow { id?: number; name: string; image_url: string; website_url: string; phone: string; location: string; description: string; is_active: boolean; sort_order: number }
 
 const EMPTY_DIR: DirRow = { name: "", image_url: "", website_url: "", phone: "", location: "", description: "", is_active: true, sort_order: 0 };
@@ -28,6 +28,7 @@ export default function AdminAgentsPage({ adminFetch, onBack }: Props) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState<any[]>([]);
   const [searching, setSearching] = useState(false);
+  const [pctEdit, setPctEdit] = useState<{ id: number; value: string } | null>(null);
   const [clientsOf, setClientsOf] = useState<{ agent: AgentRow; data: any | null } | null>(null);
 
   const [dir, setDir] = useState<any[]>([]);
@@ -72,6 +73,16 @@ export default function AdminAgentsPage({ adminFetch, onBack }: Props) {
       showToast(enabled ? "تم تفعيل حساب الوكيل" : "تم إلغاء حساب الوكيل", "success");
       loadAgents();
     } catch (e: any) { showToast(e?.message || "فشل التحديث", "error"); }
+  };
+
+  const savePercent = async (id: number, value: string | null) => {
+    try {
+      const r = await adminFetch(`/api/admin/agents/users/${id}/percent`, json({ percent: value === null || value.trim() === "" ? null : Number(value) }));
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d?.error || "فشل الحفظ");
+      showToast(d.percent === null ? "عاد الوكيل للنسبة العامة" : `نسبة الوكيل الآن ${d.percent}%`, "success");
+      setPctEdit(null); loadAgents();
+    } catch (e: any) { showToast(e?.message || "فشل الحفظ", "error"); }
   };
 
   const openClients = async (agent: AgentRow) => {
@@ -132,7 +143,7 @@ export default function AdminAgentsPage({ adminFetch, onBack }: Props) {
             ))}
           </div>
           <label className="block space-y-1">
-            <span className="text-[11px] font-bold text-gray-500">نسبة عمولة الوكيل من صافي ربح المتجر (%)</span>
+            <span className="text-[11px] font-bold text-gray-500">النسبة العامة لعمولة الوكيل من صافي ربح المتجر (%) — يمكن تخصيص نسبة لكل وكيل من بطاقته</span>
             <input type="number" min={0} max={100} step="0.1" value={cfg.percent} onChange={e => setCfg({ ...cfg, percent: Number(e.target.value) })} className={input} dir="ltr" />
           </label>
           <p className="text-[10px] text-gray-400 leading-relaxed">مثال: منتج سعره 100$ وربحك عليه 5% → يُباع بـ 105$ وربحك 5$. بعمولة {cfg.percent || 0}% يحصل الوكيل على {money(5 * (Number(cfg.percent) || 0) / 100)} من كل عملية شراء لأحد عملائه. العمولة لا تُحسب على الشحن، وتُسحب تلقائياً إن استُرجع الطلب.</p>
@@ -189,6 +200,21 @@ export default function AdminAgentsPage({ adminFetch, onBack }: Props) {
                       <div className="bg-gray-50 rounded-md py-1.5"><p className="text-[10px] text-gray-500">العملاء</p><p className="text-xs font-black text-gray-800">{a.clients_count}</p></div>
                       <div className="bg-green-50 rounded-md py-1.5"><p className="text-[10px] text-gray-500">العمولات</p><p className="text-xs font-black text-green-700">{money(a.total_commission)}</p></div>
                     </div>
+                    {pctEdit?.id === a.id ? (
+                      <div className="flex items-center gap-1.5 bg-amber-50 rounded-md p-2">
+                        <span className="text-[11px] font-bold text-amber-700 shrink-0">نسبته %</span>
+                        <input autoFocus type="number" min={0} max={100} step="0.1" value={pctEdit.value} onChange={e => setPctEdit({ id: a.id, value: e.target.value })}
+                          placeholder={`العامة ${cfg?.percent ?? 5}`} className="flex-1 min-w-0 p-1.5 rounded border border-amber-200 text-sm outline-none" dir="ltr" />
+                        <button onClick={() => savePercent(a.id, pctEdit.value)} className="px-2.5 py-1.5 rounded bg-[var(--brand)] text-white text-[11px] font-bold">حفظ</button>
+                        {a.custom_percent !== null && <button onClick={() => savePercent(a.id, null)} className="px-2 py-1.5 rounded bg-white text-gray-600 text-[11px] font-bold">العامة</button>}
+                        <button onClick={() => setPctEdit(null)} className="p-1 text-gray-400"><X size={14} /></button>
+                      </div>
+                    ) : (
+                      <button onClick={() => setPctEdit({ id: a.id, value: a.custom_percent === null ? "" : String(a.custom_percent) })} className="w-full flex items-center justify-between bg-amber-50 rounded-md px-2.5 py-2 text-[11px] font-bold text-amber-700">
+                        <span>نسبة العمولة من صافي الربح: {a.effective_percent}% {a.custom_percent === null ? "(العامة)" : "(مخصّصة)"}</span>
+                        <Pencil size={12} />
+                      </button>
+                    )}
                     <div className="flex gap-2">
                       <button onClick={() => openClients(a)} className="flex-1 py-2 rounded-md bg-gray-100 text-gray-700 text-[11px] font-bold flex items-center justify-center gap-1"><Users size={13} /> العملاء</button>
                       {a.agent_enabled

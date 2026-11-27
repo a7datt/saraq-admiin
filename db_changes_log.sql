@@ -336,3 +336,10 @@ CREATE TABLE IF NOT EXISTS public.agents_directory (
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
 ALTER TABLE public.agents_directory ENABLE ROW LEVEL SECURITY;
 -- (نص الدالتين الكامل مطبّق عبر Supabase migration "agents_system")
+
+-- ============================================================
+-- 2026-11-27 — migration: agent_custom_commission_percent
+-- نسبة عمولة مخصّصة لكل وكيل (NULL = النسبة العامة agent_commission_percent)
+-- ============================================================
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS agent_commission_percent numeric
+  CHECK (agent_commission_percent IS NULL OR (agent_commission_percent >= 0 AND agent_commission_percent <= 100));

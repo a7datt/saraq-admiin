@@ -11004,7 +11004,7 @@ ${userContext}
   // قائمة الوكلاء: المفعّلون يدوياً + كل من لديه عملاء مسجّلون عبره
   app.get("/api/admin/agents", async (req, res) => {
     try {
-      const cols = "id, name, email, agent_enabled, agent_code, is_banned, created_at";
+      const cols = "id, name, email, agent_enabled, agent_code, is_banned, created_at, agent_commission_percent";
       const enabledRows = await fetchAllRowsPaged<any>((f, t) => supabase.from("users").select(cols).eq("agent_enabled", true).order("id").range(f, t));
       const clientRows = await fetchAllRowsPaged<any>((f, t) => supabase.from("users").select("agent_id").not("agent_id", "is", null).eq("is_verified", true).order("id").range(f, t));
       const clientCount: Record<string, number> = {};
@@ -11023,6 +11023,8 @@ ${userContext}
       const list = Object.values(byId).map((u: any) => ({
         id: u.id, name: u.name, email: u.email, agent_enabled: !!u.agent_enabled, agent_code: u.agent_code,
         is_active_agent: agentCore.isAgentWith(settings, u),
+        custom_percent: u.agent_commission_percent === null || u.agent_commission_percent === undefined ? null : Number(u.agent_commission_percent),
+        effective_percent: agentCore.effectivePercent(settings, u),
         clients_count: clientCount[u.id] || 0,
         total_commission: Math.round((commTotal[u.id] || 0) * 10000) / 10000,
       })).sort((a: any, b: any) => b.clients_count - a.clients_count || b.id - a.id);
@@ -11041,6 +11043,26 @@ ${userContext}
       const code = enabled ? await agentCore.ensureAgentCode(id) : null;
       logAdminActivity({ action_type: enabled ? "agent_enabled" : "agent_disabled", target_model: "users", target_id: String(id), details: `${enabled ? "تفعيل" : "إلغاء"} حساب الوكيل للمستخدم ${u.name} (#${id})`, req }).catch(() => {});
       res.json({ success: true, agent_code: code });
+    } catch (e: any) { coreFail(res, e, req); }
+  });
+
+  // نسبة عمولة مخصّصة لوكيل معيّن (null = العودة للنسبة العامة)
+  app.post("/api/admin/agents/users/:id/percent", async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "رقم المستخدم غير صالح" });
+      const raw = req.body?.percent;
+      let pct: number | null = null;
+      if (raw !== null && raw !== undefined && raw !== "") {
+        pct = Number(raw);
+        if (!Number.isFinite(pct) || pct < 0 || pct > 100) return res.status(400).json({ error: "النسبة يجب أن تكون بين 0 و100" });
+        pct = Math.round(pct * 100) / 100;
+      }
+      const { data: u, error } = await supabase.from("users").update({ agent_commission_percent: pct }).eq("id", id).select("id, name").maybeSingle();
+      if (error) throw error;
+      if (!u) return res.status(404).json({ error: "المستخدم غير موجود" });
+      logAdminActivity({ action_type: "agent_percent_updated", target_model: "users", target_id: String(id), details: pct === null ? `إعادة الوكيل ${u.name} (#${id}) للنسبة العامة` : `نسبة عمولة الوكيل ${u.name} (#${id}) = ${pct}%`, req }).catch(() => {});
+      res.json({ success: true, percent: pct });
     } catch (e: any) { coreFail(res, e, req); }
   });
 

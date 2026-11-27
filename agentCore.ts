@@ -3,7 +3,7 @@
 //  - الوكيل = مستخدم يُسمح له بدعوة آخرين عبر رابط/كود وكيل.
 //  - التفعيل: إعداد agents_enabled = true، والنمط agents_mode = "all" (كل المستخدمين)
 //    أو "selected" (فقط من users.agent_enabled = true).
-//  - العمولة = agent_commission_percent % من صافي ربح المتجر في الطلب (وليس من الشحن ولا من سعر المنتج).
+//  - العمولة = نسبة الوكيل المخصّصة (users.agent_commission_percent) أو العامة agent_commission_percent % من صافي ربح المتجر في الطلب (وليس من الشحن ولا من سعر المنتج).
 //  - الإضافة ذرّية ومرة واحدة لكل طلب عبر دالة القاعدة apply_agent_commission، وتُعكس تلقائياً
 //    عند استرجاع الطلب داخل refund_order_once.
 // =====================================================================================
@@ -56,6 +56,16 @@ export function createAgentCore(supabase: any) {
     return settings.mode === "all" || user.agent_enabled === true;
   }
 
+  // النسبة الفعلية للوكيل: نسبته المخصّصة إن وُجدت، وإلا النسبة العامة
+  function effectivePercent(settings: AgentSettings, user: any): number {
+    const v = user?.agent_commission_percent;
+    if (v !== undefined && v !== null && v !== "") {
+      const n = Number(v);
+      if (Number.isFinite(n) && n >= 0 && n <= 100) return n;
+    }
+    return settings.percent;
+  }
+
   async function isAgent(user: any): Promise<boolean> {
     return isAgentWith(await getAgentSettings(), user);
   }
@@ -93,16 +103,18 @@ export function createAgentCore(supabase: any) {
     try {
       if (!opts.agentId || Number(opts.agentId) === Number(opts.buyerId)) return 0;
       const settings = await getAgentSettings();
-      if (!settings.enabled || settings.percent <= 0) return 0;
+      if (!settings.enabled) return 0;
       const profit = Number(opts.netProfit) || 0;
       if (profit <= 0) return 0;
-      const { data: agent } = await supabase.from("users").select("id, agent_enabled, is_banned").eq("id", opts.agentId).maybeSingle();
+      const { data: agent } = await supabase.from("users").select("id, agent_enabled, is_banned, agent_commission_percent").eq("id", opts.agentId).maybeSingle();
       if (!agent || !isAgentWith(settings, agent)) return 0;
-      const amount = Math.round(profit * (settings.percent / 100) * 10000) / 10000;
+      const pct = effectivePercent(settings, agent);
+      if (pct <= 0) return 0;
+      const amount = Math.round(profit * (pct / 100) * 10000) / 10000;
       if (amount <= 0) return 0;
       const { data, error } = await supabase.rpc("apply_agent_commission", {
         p_order_id: Number(opts.orderId), p_agent_id: Number(opts.agentId), p_user_id: Number(opts.buyerId),
-        p_amount: amount, p_net_profit: profit, p_percent: settings.percent,
+        p_amount: amount, p_net_profit: profit, p_percent: pct,
       });
       if (error) { console.error(`[AGENTS] فشل إضافة عمولة الطلب #${opts.orderId}:`, error.message); return 0; }
       return data === true ? amount : 0;
@@ -150,5 +162,5 @@ export function createAgentCore(supabase: any) {
     };
   }
 
-  return { getAgentSettings, invalidate, isAgentWith, isAgent, ensureAgentCode, resolveAgentIdByCode, applyAgentCommission, getAgentClients };
+  return { getAgentSettings, invalidate, isAgentWith, effectivePercent, isAgent, ensureAgentCode, resolveAgentIdByCode, applyAgentCommission, getAgentClients };
 }
